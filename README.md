@@ -1,12 +1,8 @@
-# ⚡ Aegis-WAL
+# Aegis-WAL
 
-**High-Performance, Cloud-Native Write-Ahead Log Engine · Java 21 ·**
+Write-ahead log implementation with tiered storage support. Hot data stays on local SSDs, cold data gets archived to S3/MinIO.
 
-A production-grade distributed WAL engine that splits data across a low-latency **Hot Tier** (memory-mapped local files) and an asynchronous **Cold Tier** (MinIO object storage), mimicking Kafka's KIP-405 Tiered Storage — with zero framework bloat.
-
-
-
----
+Built on Java 21.
 
 ## Architecture
 
