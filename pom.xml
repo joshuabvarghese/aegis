@@ -5,34 +5,38 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.aegis</groupId>
-    <artifactId>aegis-wal</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <artifactId>aegis-storage</artifactId>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
+
+    <name>Aegis-Storage</name>
+    <description>
+        A from-scratch implementation of the LSM-tree storage engine that underlies
+        Apache Cassandra's write path: CommitLog, MemTable, SSTable flush, Size-Tiered
+        Compaction, Bloom filter reads, and async cold-tier offload to object storage.
+        Built in Java 21 with zero framework dependencies.
+    </description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.2</junit.version>
-        <minio.version>8.5.9</minio.version>
-        <lanterna.version>3.1.2</lanterna.version>
         <jmh.version>1.37</jmh.version>
+        <minio.version>8.5.9</minio.version>
         <slf4j.version>2.0.12</slf4j.version>
     </properties>
 
     <dependencies>
+        <!-- MinIO SDK — cold tier object storage (local or AWS S3 compatible) -->
         <dependency>
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
             <version>${minio.version}</version>
         </dependency>
 
-        <dependency>
-            <groupId>com.googlecode.lanterna</groupId>
-            <artifactId>lanterna</artifactId>
-            <version>${lanterna.version}</version>
-        </dependency>
-
+        <!-- SLF4J simple — structured log output, no Logback/Spring bloat -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
@@ -44,6 +48,7 @@
             <version>${slf4j.version}</version>
         </dependency>
 
+        <!-- JMH — microbenchmark harness for write/read/compaction throughput -->
         <dependency>
             <groupId>org.openjdk.jmh</groupId>
             <artifactId>jmh-core</artifactId>
@@ -56,9 +61,16 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- JUnit 5 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
@@ -87,6 +99,7 @@
                 </configuration>
             </plugin>
 
+            <!-- Fat JAR — main entry point is the interactive CLI shell -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -94,15 +107,14 @@
                 <executions>
                     <execution>
                         <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
+                        <goals><goal>shade</goal></goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.aegis.tui.AegisDashboard</mainClass>
+                                    <mainClass>com.aegis.cli.StorageEngineShell</mainClass>
                                 </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
                             <filters>
                                 <filter>
