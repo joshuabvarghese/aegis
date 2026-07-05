@@ -34,7 +34,7 @@ docker compose run --rm engine
         ▼
   ┌─────────────────────────────────────────────────────────┐
   │  CommitLog  (durability before anything else)           │
-  │  *.clog  │  [Length:4B][Record:nB][CRC32C:4B]          │
+  │  *.clog  │  [Length:4B][Record:nB][CRC32C:4B]           │
   │  fsync every 200ms (PERIODIC mode = cassandra default)  │
   └─────────────────────┬───────────────────────────────────┘
                         │ CommitLogPosition returned
@@ -51,7 +51,7 @@ docker compose run --rm engine
   │  SSTable  (immutable, sorted, on-disk)                  │
   │  ├── {gen}-Data.db        sorted partition data         │
   │  ├── {gen}-Index.db       sparse partition index        │
-  │  ├── {gen}-Filter.db      Bloom filter (1% FPP)        │
+  │  ├── {gen}-Filter.db      Bloom filter (1% FPP)         │
   │  ├── {gen}-Statistics.db  metadata + CommitLog pos      │
   │  └── {gen}-Summary.db     sampled index summary         │
   └─────────────────────┬───────────────────────────────────┘

@@ -155,7 +155,7 @@ public final class BloomFilter {
      * Optimal bit array size: m = -n * ln(p) / (ln 2)^2
      * Same formula as Cassandra's BloomCalculations.computeBloomSpec().
      */
-    static long optimalNumBits(long n, double p) {
+    public static long optimalNumBits(long n, double p) {
         if (p == 0) p = Double.MIN_VALUE;
         return (long) (-n * Math.log(p) / (Math.log(2) * Math.log(2)));
     }
@@ -163,7 +163,7 @@ public final class BloomFilter {
     /**
      * Optimal number of hash functions: k = (m/n) * ln 2
      */
-    static int optimalNumHashFunctions(long n, long m) {
+    public static int optimalNumHashFunctions(long n, long m) {
         return Math.max(1, (int) Math.round((double) m / n * Math.log(2)));
     }
 
