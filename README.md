@@ -1,4 +1,4 @@
-# Aegis-Storage
+# Aegis
 
 **A from-scratch implementation of the LSM-tree storage engine underlying Apache Cassandra's write path.**
 
