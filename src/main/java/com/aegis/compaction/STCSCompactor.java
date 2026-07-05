@@ -129,7 +129,7 @@ public final class STCSCompactor {
         return buckets.stream()
             .filter(b -> b.size() >= StorageConfig.STCS_MIN_THRESHOLD)
             .max(Comparator
-                .comparingInt(List::size)
+                .<List<SSTableMetadata>>comparingInt(b -> b.size())
                 .thenComparingDouble(b -> b.stream()
                     .mapToLong(SSTableMetadata::dataSizeBytes)
                     .average()
@@ -243,7 +243,7 @@ public final class STCSCompactor {
      * Tombstones are kept here — they are purged separately by purgeTombstones()
      * which only removes tombstones past GC grace period.
      */
-    static Row mergeAllVersions(List<Row> versions) {
+    public static Row mergeAllVersions(List<Row> versions) {
         if (versions.size() == 1) return versions.get(0);
 
         // Start with the first version and merge all others into it
@@ -277,7 +277,7 @@ public final class STCSCompactor {
      *
      * In our single-node implementation, GC_GRACE_SECONDS=0 means immediate purge.
      */
-    static Row purgeTombstones(Row row, long gcGraceSeconds) {
+    public static Row purgeTombstones(Row row, long gcGraceSeconds) {
         Row purged = Row.create(row.key());
         for (var entry : row.cells().entrySet()) {
             Row.Cell cell = entry.getValue();

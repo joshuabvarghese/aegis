@@ -66,8 +66,8 @@ public final class CommitLogSegment implements Closeable {
     // Monotonically increasing position — used by CrashRecovery to find replay start
     private long writtenBytes = 0;
 
-    CommitLogSegment(Path dir, long segmentId,
-                     StorageConfig.CommitLogSyncMode syncMode) throws IOException {
+    public CommitLogSegment(Path dir, long segmentId,
+                            StorageConfig.CommitLogSyncMode syncMode) throws IOException {
         this.segmentId = segmentId;
         this.syncMode  = syncMode;
         this.filePath  = dir.resolve("%020d.clog".formatted(segmentId));
@@ -157,7 +157,7 @@ public final class CommitLogSegment implements Closeable {
      *     [nameLength: 2B][name: nameB][flags: 1B][timestampMicros: 8B][ttl: 4B]
      *     [valueLength: 4B][value: valueB or empty if tombstone]
      */
-    static byte[] serialize(Row row) {
+    public static byte[] serialize(Row row) {
         byte[] keyBytes = row.key().bytes();
         var cells = row.cells();
 

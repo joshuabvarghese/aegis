@@ -58,7 +58,7 @@ public final class StorageEngineShell {
         engine = new StorageEngine(coldTier);
 
         System.out.println("  Engine ready. CommitLog + MemTable active.");
-        if (coldTier) System.out.println("  Cold tier enabled (MinIO at " + StorageConfig.MINIO_ENDPOINT + ")");
+        if (coldTier) System.out.println("  Cold tier enabled (MinIO at " + StorageConfig.minioEndpoint() + ")");
         System.out.println();
         System.out.println("  Type 'demo' to run the full automated demo, or 'help' for commands.");
         System.out.println();
