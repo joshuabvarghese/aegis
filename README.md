@@ -10,7 +10,7 @@ CommitLog → MemTable → SSTable flush → Size-Tiered Compaction → async co
 ## One-command demo
 
 ```bash
-git clone https://github.com/you/aegis-storage
+git clone https://github.com/joshuabvarghese/aegis-storage
 cd aegis-storage
 docker compose run --rm demo
 ```
