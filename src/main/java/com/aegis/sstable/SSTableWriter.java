@@ -71,7 +71,7 @@ public final class SSTableWriter implements Closeable {
     static final int  INDEX_MAGIC  = 0xAE550002;
     static final int  FILTER_MAGIC = 0xAE550003;
     static final byte VERSION      = 0x01;
-    static final int  FILE_HEADER_SIZE = 4 + 8 + 2; // magic + generation + version = 14 bytes
+    static final int  FILE_HEADER_SIZE = 4 + 8 + 1; // magic(4) + generation(8) + version(1) = 13 bytes
 
     private final long   generation;
     private final Path   baseDir;
@@ -89,8 +89,18 @@ public final class SSTableWriter implements Closeable {
 
     // Sparse index state
     private long bytesWrittenSinceLastIndexEntry = 0;
+    private long indexFilePosition = FILE_HEADER_SIZE; // running write position within Index.db
+    private long indexEntryCount   = 0;                // how many entries written to Index.db so far
 
-    // Summary index — sampled entries from the partition index
+    /** Every Nth Index.db entry is copied into the in-memory Summary. */
+    static final int SUMMARY_SAMPLE_RATE = 128;
+
+    // Summary index — sampled entries from the partition index.
+    // NOTE: dataOffset() here stores the byte offset *within Index.db*, not
+    // Data.db — the reader binary-searches this to find where to start
+    // scanning Index.db, then Index.db entries themselves carry the Data.db
+    // offset. Conflating these two was the cause of a nasty "key not found"
+    // bug: mixing up which file an offset belongs to.
     private final List<IndexEntry> summaryEntries = new ArrayList<>();
 
     // Statistics gathered during write
@@ -129,7 +139,7 @@ public final class SSTableWriter implements Closeable {
         hdr.putLong(generation);
         hdr.put(VERSION);
         hdr.flip();
-        dataChannel.write(hdr, 0);
+        dataChannel.write(hdr);
     }
 
     private void writeIndexHeader() throws IOException {
@@ -138,7 +148,7 @@ public final class SSTableWriter implements Closeable {
         hdr.putLong(generation);
         hdr.put(VERSION);
         hdr.flip();
-        indexChannel.write(hdr, 0);
+        indexChannel.write(hdr);
     }
 
     // ─── Partition Writing ────────────────────────────────────────────────────
@@ -194,13 +204,19 @@ public final class SSTableWriter implements Closeable {
         bytesWrittenSinceLastIndexEntry += frameSize;
         if (bytesWrittenSinceLastIndexEntry >= StorageConfig.SSTABLE_INDEX_SAMPLE_BYTES
                 || partitionCount == 0) {
-            writeIndexEntry(key, partitionOffset);
+            long indexOffset = writeIndexEntry(key, partitionOffset);
             bytesWrittenSinceLastIndexEntry = 0;
 
-            // Summary: sample every 128 index entries
-            if (summaryEntries.size() % 128 == 0) {
-                summaryEntries.add(new IndexEntry(key, partitionOffset));
+            // Summary: sample every SUMMARY_SAMPLE_RATE index entries.
+            // Uses a running counter rather than summaryEntries.size() — checking
+            // size() against itself after the list only grows when this same
+            // condition is true meant it could only ever be true once (a
+            // fixed point at size()==1), so no entry after the first one was
+            // ever sampled.
+            if (indexEntryCount % SUMMARY_SAMPLE_RATE == 0) {
+                summaryEntries.add(new IndexEntry(key, indexOffset));
             }
+            indexEntryCount++;
         }
 
         // Track statistics
@@ -244,7 +260,9 @@ public final class SSTableWriter implements Closeable {
         return buf.array();
     }
 
-    private void writeIndexEntry(PartitionKey key, long dataOffset) throws IOException {
+    /** Writes one (key -> Data.db offset) entry to Index.db, returning this entry's own byte offset within Index.db. */
+    private long writeIndexEntry(PartitionKey key, long dataOffset) throws IOException {
+        long entryOffset = indexFilePosition;
         byte[] keyBytes = key.bytes();
         ByteBuffer entry = ByteBuffer.allocate(2 + keyBytes.length + 8);
         entry.putShort((short) keyBytes.length);
@@ -252,6 +270,8 @@ public final class SSTableWriter implements Closeable {
         entry.putLong(dataOffset);
         entry.flip();
         indexChannel.write(entry);
+        indexFilePosition += 2 + keyBytes.length + 8;
+        return entryOffset;
     }
 
     // ─── Finalization ─────────────────────────────────────────────────────────

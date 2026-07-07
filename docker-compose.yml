@@ -82,14 +82,29 @@ services:
     command: shell
 
   # ── Automated Demo (one-shot, no stdin needed) ───────────────────────────────
-  # Runs the full 6-act demo, prints results, then exits.
-  # This is the service to use for recording an asciinema demo.
+  # Runs the full 6-act demo, prints results, then exits. 
+  # Use `docker compose run --rm demo-cold` for the cold-tier variant instead.
   demo:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
     container_name: aegis-demo
+    image: aegis-storage:latest
+    volumes:
+      - demo-data:/data
+    stdin_open: false
+    tty: false
+    command: demo
+    restart: "no"
+
+  # ── Automated Demo with Cold Tier (requires MinIO) ───────────────────────────
+  demo-cold:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: aegis-demo-cold
     image: aegis-storage:latest
     depends_on:
       minio:
@@ -139,6 +154,24 @@ services:
       "
     restart: "no"
 
+  # ── HTTP Server (same engine, exposed over REST — mirrors the Cloud Run deploy) ──
+  serve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: aegis-serve
+    image: aegis-storage:latest
+    environment:
+      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC"
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - serve-data:/data
+    command: serve
+    restart: unless-stopped
+
 volumes:
   minio-data:
     driver: local
@@ -147,6 +180,8 @@ volumes:
   demo-data:
     driver: local
   bench-data:
+    driver: local
+  serve-data:
     driver: local
   maven-cache:
     driver: local

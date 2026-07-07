@@ -89,16 +89,33 @@ public final class SSTableReader implements Closeable {
         }
         bloomFilterHits++;
 
-        // Step 2: Binary search the summary index to narrow the index file range
+        // Step 2: Binary search the in-memory summary to find where in Index.db
+        // we should start scanning.
         long indexSearchFrom = findIndexSearchStart(key);
 
-        // Step 3: Sequential scan the index file region to find data file offset
-        long dataOffset = findDataOffset(key, indexSearchFrom);
-        if (dataOffset < 0) {
+        // Step 3: Scan Index.db from that point. Index.db is itself a *sparse*
+        // index (one entry per SSTABLE_INDEX_SAMPLE_BYTES), so most keys won't
+        // have an exact Index.db entry — we may only learn the Data.db offset
+        // of the largest indexed key that is <= our target.
+        IndexScanResult scan = findDataOffset(key, indexSearchFrom);
+
+        long dataOffset;
+        if (scan.exactDataOffset() >= 0) {
+            // Fast path: the key itself was in Index.db.
+            dataOffset = scan.exactDataOffset();
+        } else if (scan.lowerBoundDataOffset() >= 0) {
+            // Step 4a: fall back to a sequential scan of Data.db starting from
+            // the last known indexed offset <= target, since the exact key may
+            // sit between two sparse index samples.
+            Optional<Row> fromScan = scanDataForKey(scan.lowerBoundDataOffset(), key);
+            if (fromScan.isEmpty()) return Optional.empty();
+            diskReads++;
+            return fromScan;
+        } else {
             return Optional.empty(); // false positive from Bloom filter
         }
 
-        // Step 4: Seek to data file offset and deserialize the partition
+        // Step 4b: exact index hit — seek straight to the offset.
         diskReads++;
         return Optional.ofNullable(readPartitionAt(dataOffset, key));
     }
@@ -137,21 +154,23 @@ public final class SSTableReader implements Closeable {
     /**
      * Scan the Index.db file starting from indexFromOffset, looking for targetKey.
      *
-     * The index file contains entries in token-sorted order. We scan forward
-     * from our starting position until we either find the key or pass it
-     * (since keys are sorted, passing means it's not there).
+     * The index file contains entries in token-sorted order, but it is itself
+     * sparse (one entry per SSTABLE_INDEX_SAMPLE_BYTES of data), so most keys
+     * will not have an exact entry here. We therefore track two things:
+     *   - an exact match, if the key happens to be indexed, and
+     *   - the Data.db offset of the last indexed key <= target, which is the
+     *     safe starting point for a fallback sequential scan of Data.db.
      *
-     * Returns the data file offset, or -1 if not found.
+     * Index.db is small by construction (sparse), so we scan it in full rather
+     * than capping at an arbitrary byte limit — capping there was itself a
+     * source of false negatives for SSTables with more than one index entry.
      */
-    private long findDataOffset(PartitionKey targetKey, long indexFromOffset) throws IOException {
+    private IndexScanResult findDataOffset(PartitionKey targetKey, long indexFromOffset) throws IOException {
         long indexSize = indexChannel.size();
         long pos       = indexFromOffset;
+        long lowerBoundDataOffset = -1;
 
-        // We scan at most INDEX_SAMPLE_BYTES worth of index entries per lookup.
-        // Beyond that we know the key isn't in this SSTable (it would have been indexed).
-        long scanLimit = pos + 64 * 1024; // scan at most 64KB of index
-
-        while (pos < indexSize && pos < scanLimit) {
+        while (pos < indexSize) {
             // Read key length
             ByteBuffer lenBuf = ByteBuffer.allocate(2);
             int read = indexChannel.read(lenBuf, pos);
@@ -178,14 +197,68 @@ public final class SSTableReader implements Closeable {
 
             int cmp = indexedKey.compareTo(targetKey);
             if (cmp == 0) {
-                return dataOffset; // exact match
+                return new IndexScanResult(dataOffset, dataOffset); // exact match
             } else if (cmp > 0) {
-                return -1; // passed the target key — not in this SSTable
+                break; // passed the target key in Index.db — fall back to Data.db scan
             }
 
+            lowerBoundDataOffset = dataOffset;
             pos += entrySize;
         }
-        return -1;
+        return new IndexScanResult(-1, lowerBoundDataOffset);
+    }
+
+    /** Result of scanning Index.db for a key: an exact hit, and/or a lower-bound Data.db offset to fall back to. */
+    private record IndexScanResult(long exactDataOffset, long lowerBoundDataOffset) {}
+
+    // ─── Step 4a: Data File Fallback Scan ─────────────────────────────────────
+
+    /**
+     * Sequentially scan Data.db starting at fromDataOffset, comparing each
+     * partition's key against targetKey, until an exact match is found or a
+     * key greater than targetKey is seen (partitions are token-sorted, so
+     * that means targetKey isn't in this SSTable).
+     *
+     * This is the step that makes the sparse index actually work: between two
+     * indexed keys there can be many un-indexed partitions, and this is where
+     * we find them.
+     */
+    private Optional<Row> scanDataForKey(long fromDataOffset, PartitionKey targetKey) throws IOException {
+        long pos  = fromDataOffset;
+        long size = dataChannel.size();
+
+        while (pos < size) {
+            ByteBuffer lenBuf = ByteBuffer.allocate(4);
+            if (dataChannel.read(lenBuf, pos) < 4) break;
+            lenBuf.flip();
+            int partitionLen = lenBuf.getInt();
+            if (partitionLen <= 0 || partitionLen > 64 * 1024 * 1024) break;
+
+            // Peek just the key at the start of the partition payload, without
+            // reading/deserializing the (possibly much larger) cell data yet.
+            ByteBuffer keyLenBuf = ByteBuffer.allocate(2);
+            dataChannel.read(keyLenBuf, pos + 4);
+            keyLenBuf.flip();
+            int keyLen = keyLenBuf.getShort() & 0xFFFF;
+
+            ByteBuffer keyBuf = ByteBuffer.allocate(keyLen);
+            dataChannel.read(keyBuf, pos + 4 + 2);
+            keyBuf.flip();
+            byte[] keyBytes = new byte[keyLen];
+            keyBuf.get(keyBytes);
+            PartitionKey candidateKey = PartitionKey.of(keyBytes);
+
+            int cmp = candidateKey.compareTo(targetKey);
+            if (cmp == 0) {
+                Row row = readPartitionAt(pos, targetKey);
+                return Optional.ofNullable(row);
+            } else if (cmp > 0) {
+                return Optional.empty(); // passed it — not in this SSTable
+            }
+
+            pos += 4 + partitionLen + 4; // advance past this partition's frame
+        }
+        return Optional.empty();
     }
 
     // ─── Step 4: Data File Read ───────────────────────────────────────────────

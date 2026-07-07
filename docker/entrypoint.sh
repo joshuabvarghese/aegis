@@ -67,9 +67,17 @@ case "$MODE" in
         cat /data/benchmark-results.json 2>/dev/null || true
         ;;
 
+    serve)
+        echo "[entrypoint] Starting HTTP server on port ${PORT:-8080}..."
+        exec java $JAVA_OPTS \
+            -Duser.home=/data \
+            -cp "$JAR" \
+            com.aegis.http.AegisHttpServer
+        ;;
+
     *)
         echo "[entrypoint] Unknown mode: $MODE"
-        echo "  Valid modes: shell, demo, demo-cold, bench"
+        echo "  Valid modes: shell, demo, demo-cold, bench, serve"
         exit 1
         ;;
 esac

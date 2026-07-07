@@ -176,7 +176,7 @@ public final class CommitLog implements Closeable {
      * @return                replay statistics
      */
     public ReplayStats replay(Consumer<Row> replayConsumer) throws IOException {
-        List<Path> segmentPaths = findSegmentFiles();
+        List<Path> segmentPaths = new ArrayList<>(findSegmentFiles());
         segmentPaths.sort(Comparator.comparing(p -> {
             String name = p.getFileName().toString().replace(".clog", "");
             try { return Long.parseLong(name); } catch (NumberFormatException e) { return 0L; }

@@ -167,7 +167,7 @@ public final class StorageEngine implements Closeable {
 
         // Step 3: Trigger flush if MemTable has reached its threshold
         if (activeMemTable.shouldFlush()) {
-            triggerFlush();
+            triggerFlush(false);
         }
     }
 
@@ -270,12 +270,17 @@ public final class StorageEngine implements Closeable {
      * This mirrors Cassandra's ColumnFamilyStore.switchMemTableIfCurrent() +
      * flush() pattern.
      */
-    private void triggerFlush() {
+    private void triggerFlush(boolean force) {
         MemTable toFlush;
 
         memTableLock.writeLock().lock();
         try {
-            if (!activeMemTable.shouldFlush()) return; // another thread beat us here
+            // Bail out if there's nothing to do: either the threshold hasn't been
+            // reached yet (and no one is forcing it), or the active MemTable is
+            // already mid-flush / empty.
+            if (!force && !activeMemTable.shouldFlush()) return;
+            if (activeMemTable.status() != MemTable.Status.ACTIVE) return;
+            if (activeMemTable.isEmpty()) return;
 
             toFlush = activeMemTable;
             toFlush.markFlushing();
@@ -345,8 +350,10 @@ public final class StorageEngine implements Closeable {
         MemTable current = activeMemTable;
         if (current.isEmpty()) return;
 
-        // Temporarily lower threshold to trigger flush
-        triggerFlush();
+        // force=true bypasses the size threshold — this is what makes "force" mean
+        // something. Without it, forceFlush() was a no-op for any MemTable smaller
+        // than MEMTABLE_FLUSH_THRESHOLD_BYTES (i.e. every demo/CLI invocation).
+        triggerFlush(true);
 
         // Wait for flush to complete (poll)
         for (int i = 0; i < 50; i++) {

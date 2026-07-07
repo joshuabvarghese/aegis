@@ -64,6 +64,7 @@ ENV JAVA_OPTS="--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleF
 ENV AEGIS_DATA_DIR="/data"
 
 EXPOSE 8888
+EXPOSE 8080
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["shell"]
