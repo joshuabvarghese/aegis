@@ -5,7 +5,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -e
 
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 JAR="$PROJECT_DIR/target/aegis-storage-1.0.0.jar"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
@@ -38,44 +38,6 @@ build() {
     success "Built: $JAR"
 }
 
-# ─── MinIO (Cold Tier) ────────────────────────────────────────────────────────
-minio_start() {
-    info "Starting MinIO (bare-metal Homebrew binary, no Docker)..."
-    command -v minio &>/dev/null || {
-        warn "MinIO not found. Installing via Homebrew..."
-        brew install minio/stable/minio
-        brew install minio/stable/mc
-    }
-
-    if curl -sf http://127.0.0.1:9000/minio/health/live &>/dev/null; then
-        success "MinIO already running on :9000"; return
-    fi
-
-    MINIO_ROOT_USER=aegisadmin MINIO_ROOT_PASSWORD=aegisadmin \
-        minio server ~/.aegis-storage/minio-data \
-            --address ":9000" --console-address ":9001" \
-            > /tmp/aegis-minio.log 2>&1 &
-    echo $! > /tmp/aegis-minio.pid
-
-    for i in {1..20}; do
-        curl -sf http://127.0.0.1:9000/minio/health/live &>/dev/null && break
-        sleep 0.5
-    done
-
-    mc alias set aegislocal http://127.0.0.1:9000 aegisadmin aegisadmin &>/dev/null || true
-    mc mb aegislocal/aegis-storage-cold --ignore-existing &>/dev/null || true
-    success "MinIO running (PID=$(cat /tmp/aegis-minio.pid))"
-}
-
-minio_stop() {
-    if [[ -f /tmp/aegis-minio.pid ]]; then
-        kill "$(cat /tmp/aegis-minio.pid)" 2>/dev/null && success "MinIO stopped"
-        rm -f /tmp/aegis-minio.pid
-    else
-        warn "MinIO PID file not found"
-    fi
-}
-
 # ─── Run Modes ────────────────────────────────────────────────────────────────
 run_shell() {
     info "Launching interactive CLI shell..."
@@ -84,16 +46,6 @@ run_shell() {
          -XX:+UseZGC \
          -Djava.util.logging.SimpleFormatter.format="[%4\$s] %5\$s%n" \
          -jar "$JAR"
-}
-
-run_shell_cold() {
-    info "Launching with cold tier enabled (MinIO must be running)..."
-    minio_start
-    java --enable-preview \
-         -Xmx256m \
-         -XX:+UseZGC \
-         -Djava.util.logging.SimpleFormatter.format="[%4\$s] %5\$s%n" \
-         -jar "$JAR" --cold-tier
 }
 
 run_demo() {
@@ -120,24 +72,25 @@ run_tests() {
 }
 
 run_bench() {
-    info "Running JMH benchmarks (Apple Silicon M1)..."
+    info "Running JMH benchmarks..."
     java --enable-preview \
          -Xmx256m \
          -XX:+UseZGC \
-         -jar "$JAR" \
-         -cp target/aegis-storage-1.0.0.jar \
+         -cp "$JAR" \
          org.openjdk.jmh.Main \
          "com.aegis.benchmark.StorageBenchmark" \
          -f 1 -wi 3 -i 5 -tu us \
-         -rff aegis-benchmark-results.json 2>/dev/null || {
-        # Fallback: run via Maven exec
-        cd "$PROJECT_DIR"
-        mvn -q exec:java \
-            -Dexec.mainClass="com.aegis.benchmark.StorageBenchmark" \
-            -Dexec.args="" \
-            --enable-preview
-    }
+         -rff aegis-benchmark-results.json
     success "Benchmark results: aegis-benchmark-results.json"
+}
+
+run_serve() {
+    info "Starting HTTP server on :${PORT:-8080}..."
+    PORT="${PORT:-8080}" java --enable-preview \
+         -Xmx256m \
+         -XX:+UseZGC \
+         -cp "$JAR" \
+         com.aegis.http.AegisHttpServer
 }
 
 clean() {
@@ -149,15 +102,13 @@ clean() {
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
 case "${1:-help}" in
-    build)        build ;;
-    shell)        build && run_shell ;;
-    shell-cold)   build && run_shell_cold ;;
-    demo)         build && run_demo ;;
-    minio)        minio_start ;;
-    minio-stop)   minio_stop ;;
-    test)         run_tests ;;
-    bench)        build && run_bench ;;
-    clean)        clean ;;
+    build)  build ;;
+    shell)  build && run_shell ;;
+    demo)   build && run_demo ;;
+    test)   run_tests ;;
+    bench)  build && run_bench ;;
+    serve)  build && run_serve ;;
+    clean)  clean ;;
     help|*)
         echo ""
         echo -e "  ${BOLD}Aegis-Storage — LSM-Tree Engine Demo Runner${RESET}"
@@ -167,16 +118,13 @@ case "${1:-help}" in
         echo "  Commands:"
         echo "    build        Build the fat JAR (mvn package)"
         echo "    shell        Interactive CLI shell  ← start here"
-        echo "    shell-cold   CLI with cold tier (starts MinIO automatically)"
         echo "    demo         Automated 6-act demo sequence"
-        echo "    minio        Start MinIO (Homebrew, no Docker)"
-        echo "    minio-stop   Stop MinIO"
         echo "    test         Run JUnit 5 test suite"
         echo "    bench        Run JMH benchmarks"
+        echo "    serve        Run the HTTP wrapper on \$PORT (default 8080)"
         echo "    clean        Remove build artifacts and data"
         echo ""
         echo "  JVM flags applied: --enable-preview -Xmx256m -XX:+UseZGC"
-        echo "  MinIO: bare-metal Homebrew binary, no Docker required"
         echo ""
         ;;
 esac

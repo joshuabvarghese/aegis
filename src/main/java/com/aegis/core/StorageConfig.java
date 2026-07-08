@@ -116,44 +116,6 @@ public final class StorageConfig {
      */
     public static final int COMPACTION_CHECK_INTERVAL_MS = 2_000;
 
-    // ─── Cold Tier / Tiered Storage ───────────────────────────────────────────
-
-    /**
-     * SSTables older than this threshold in seconds are eligible for cold-tier offload.
-     * Mirrors Kafka KIP-405 remote.log.segment.bytes semantics applied to SSTables.
-     *
-     * Cassandra equivalent: not native in open-source Cassandra; this mirrors what
-     * Instaclustr implements in their managed platform's ClickHouse/OpenSearch tiering.
-     */
-    public static final long COLD_TIER_AGE_THRESHOLD_SECONDS = 30L;
-
-    /**
-     * MinIO / S3 connection settings.
-     *
-     * All four values are read from environment variables first, so the same
-     * JAR works both locally (defaults below) and inside Docker Compose
-     * (where MINIO_ENDPOINT=http://minio:9000 is injected by the service).
-     *
-     * Local default:  http://127.0.0.1:9000  (Homebrew minio server)
-     * Docker default: http://minio:9000       (docker-compose service name)
-     */
-    public static String minioEndpoint() {
-        String env = System.getenv("MINIO_ENDPOINT");
-        return (env != null && !env.isBlank()) ? env : "http://127.0.0.1:9000";
-    }
-
-    public static String minioAccessKey() {
-        String env = System.getenv("MINIO_ACCESS_KEY");
-        return (env != null && !env.isBlank()) ? env : "aegisadmin";
-    }
-
-    public static String minioSecretKey() {
-        String env = System.getenv("MINIO_SECRET_KEY");
-        return (env != null && !env.isBlank()) ? env : "aegisadmin";
-    }
-
-    public static final String MINIO_BUCKET = "aegis-storage-cold";
-
     // ─── Paths ────────────────────────────────────────────────────────────────
 
     /**

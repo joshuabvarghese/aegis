@@ -1,61 +1,22 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Aegis-Storage — Docker Compose
 #
-#  NOTE: The top-level `version` field is omitted — it is obsolete in modern
-#  Docker Compose and causes a warning. Docker Compose v2+ infers the format
-#  from the file structure automatically.
-#
 #  Services:
-#    minio      — local MinIO object storage (cold tier)
-#    minio-init — creates the bucket (runs once then exits)
-#    engine     — interactive CLI shell (attach your terminal)
-#    demo       — one-shot automated demo (no stdin required)
-#    bench      — JMH benchmark runner
-#    test       — Maven + JUnit 5 test runner
+#    engine — interactive CLI shell (attach your terminal)
+#    demo   — one-shot automated demo (no stdin required)
+#    bench  — JMH benchmark runner
+#    test   — Maven + JUnit 5 test runner
+#    serve  — HTTP wrapper (mirrors the Cloud Run deployment)
 #
 #  Quick start:
 #    docker compose run --rm demo        ← watch the full demo
 #    docker compose run --rm engine      ← interactive shell
 #    docker compose run --rm bench       ← JMH benchmarks
 #    docker compose run --rm test        ← run the test suite
+#    docker compose up serve             ← HTTP server on http://localhost:8080
 # ═══════════════════════════════════════════════════════════════════════════════
 
 services:
-
-  # ── MinIO: Cold Tier Object Storage ─────────────────────────────────────────
-  minio:
-    image: minio/minio:latest
-    container_name: aegis-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: aegisadmin
-      MINIO_ROOT_PASSWORD: aegisadmin
-    ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # MinIO Console (open http://localhost:9001 in browser)
-    volumes:
-      - minio-data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
-  # ── MinIO bucket initialiser (runs once then exits) ──────────────────────────
-  minio-init:
-    image: minio/mc:latest
-    container_name: aegis-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 aegisadmin aegisadmin &&
-        mc mb --ignore-existing local/aegis-storage-cold &&
-        echo 'Bucket aegis-storage-cold ready.'
-      "
-    restart: "no"
 
   # ── Interactive Shell ────────────────────────────────────────────────────────
   # Attach your terminal to the running storage engine.
@@ -67,13 +28,7 @@ services:
       target: runtime
     container_name: aegis-engine
     image: aegis-storage:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     environment:
-      MINIO_ENDPOINT: "http://minio:9000"
       JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleFormatter.format=[%4$$s] %5$$s%n"
     volumes:
       - engine-data:/data
@@ -82,8 +37,7 @@ services:
     command: shell
 
   # ── Automated Demo (one-shot, no stdin needed) ───────────────────────────────
-  # Runs the full 6-act demo, prints results, then exits. 
-  # Use `docker compose run --rm demo-cold` for the cold-tier variant instead.
+  # Runs the full 6-act demo, prints results, then exits.
   demo:
     build:
       context: .
@@ -96,29 +50,6 @@ services:
     stdin_open: false
     tty: false
     command: demo
-    restart: "no"
-
-  # ── Automated Demo with Cold Tier (requires MinIO) ───────────────────────────
-  demo-cold:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: aegis-demo-cold
-    image: aegis-storage:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-    environment:
-      MINIO_ENDPOINT: "http://minio:9000"
-      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleFormatter.format=[%4$$s] %5$$s%n"
-    volumes:
-      - demo-data:/data
-    stdin_open: false
-    tty: false
-    command: demo-cold
     restart: "no"
 
   # ── JMH Benchmarks ───────────────────────────────────────────────────────────
@@ -173,8 +104,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  minio-data:
-    driver: local
   engine-data:
     driver: local
   demo-data:

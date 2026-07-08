@@ -13,7 +13,7 @@
     <description>
         A from-scratch implementation of the LSM-tree storage engine that underlies
         Apache Cassandra's write path: CommitLog, MemTable, SSTable flush, Size-Tiered
-        Compaction, Bloom filter reads, and async cold-tier offload to object storage.
+        Compaction, and Bloom filter reads.
         Built in Java 21 with zero framework dependencies.
     </description>
 
@@ -24,18 +24,10 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.2</junit.version>
         <jmh.version>1.37</jmh.version>
-        <minio.version>8.5.9</minio.version>
         <slf4j.version>2.0.12</slf4j.version>
     </properties>
 
     <dependencies>
-        <!-- MinIO SDK — cold tier object storage (local or AWS S3 compatible) -->
-        <dependency>
-            <groupId>io.minio</groupId>
-            <artifactId>minio</artifactId>
-            <version>${minio.version}</version>
-        </dependency>
-
         <!-- SLF4J simple — structured log output, no Logback/Spring bloat -->
         <dependency>
             <groupId>org.slf4j</groupId>

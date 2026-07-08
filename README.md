@@ -2,7 +2,7 @@
 
 **A from-scratch implementation of the LSM-tree storage engine underlying Apache Cassandra's write path.**
 
-CommitLog → MemTable → SSTable flush → Size-Tiered Compaction → async cold-tier offload to object storage. Built in Java 21 with zero framework dependencies. Fully containerised — one command to run.
+CommitLog → MemTable → SSTable flush → Size-Tiered Compaction. Built in Java 21 with zero framework dependencies. Fully containerised — one command to run.
 
 
 ---
@@ -15,7 +15,7 @@ cd aegis-storage
 docker compose run --rm demo
 ```
 
-That's it. Docker pulls MinIO and the JRE image, compiles the JAR, boots the engine, runs the 6-act demo, and exits. No Java installation, no Maven, no MinIO setup.
+That's it. Docker pulls the JDK/JRE base image, compiles the JAR, boots the engine, runs the 6-act demo, and exits. No Java installation, no Maven setup needed.
 
 **Interactive shell** (type commands yourself):
 ```bash
@@ -54,14 +54,7 @@ docker compose run --rm engine
   │  ├── {gen}-Filter.db      Bloom filter (1% FPP)         │
   │  ├── {gen}-Statistics.db  metadata + CommitLog pos      │
   │  └── {gen}-Summary.db     sampled index summary         │
-  └─────────────────────┬───────────────────────────────────┘
-                        │ age > 30s → async offload
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  Cold Tier  (MinIO / S3-compatible object storage)      │
-  │  Local files deleted after upload confirmed             │
-  │  Remote catalog retains metadata for read routing       │
-  └─────────────────────────────────────────────────────────┘
+  └───────────────────────────────────────────────────────────┘
 
                           READ PATH
                           ─────────
@@ -69,12 +62,11 @@ docker compose run --rm engine
         │
         ├─► 1. MemTable          ConcurrentSkipListMap.get()   O(log n)
         ├─► 2. Flushing MemTable (if flush in progress)
-        ├─► 3. SSTables          newest → oldest
-        │       ├─ Bloom filter  mightContain(key)?  O(k) hashes, zero I/O on miss
-        │       ├─ Summary index binary search → index file range
-        │       ├─ Index.db scan → data file offset
-        │       └─ Data.db read  → deserialise partition
-        └─► 4. Cold Tier         download Filter.db first, then Data.db if needed
+        └─► 3. SSTables          newest → oldest
+                ├─ Bloom filter  mightContain(key)?  O(k) hashes, zero I/O on miss
+                ├─ Summary index binary search → index file range
+                ├─ Index.db scan → data file offset
+                └─ Data.db read  → deserialise partition
 
                         COMPACTION (background)
                         ───────────────────────
@@ -105,7 +97,6 @@ Every component maps to a named Cassandra internal:
 | `SSTableReader` | `SSTableReader` | (internal) |
 | `STCSCompactor` | `SizeTieredCompactionStrategy` | `compaction = {'class': 'STCS'}` |
 | `GC_GRACE_SECONDS` | `gc_grace_seconds` | `gc_grace_seconds = 864000` |
-| `ColdTierManager` | Instaclustr Tiered Storage | (platform-level, not OSS) |
 
 ---
 
@@ -133,10 +124,10 @@ src/main/java/com/aegis/
 ├── compaction/
 │   └── STCSCompactor.java    STCS bucketing (bucket_low/high), k-way merge, tombstone purge
 │
-├── tiering/
-│   └── ColdTierManager.java  MinIO offload, transparent remote read, Bloom-first strategy
-│
 ├── StorageEngine.java        Top-level coordinator — write path, read path, background daemons
+│
+├── http/
+│   └── AegisHttpServer.java  Zero-dependency HTTP wrapper (com.sun.net.httpserver) — used by Cloud Run
 │
 ├── cli/
 │   └── StorageEngineShell.java  6-act interactive demo shell
@@ -164,9 +155,8 @@ docker compose run --rm test
 # JMH benchmarks
 docker compose run --rm bench
 
-# MinIO console — view uploaded cold-tier SSTables
-# Open http://localhost:9001 (user: aegisadmin / pass: aegisadmin)
-docker compose up minio
+# HTTP server on http://localhost:8080 (same wrapper used on Cloud Run)
+docker compose up serve
 ```
 
 ### Local (requires Java 21 + Maven)
@@ -174,11 +164,38 @@ docker compose up minio
 ```bash
 ./scripts/run.sh build      # compile
 ./scripts/run.sh shell      # interactive shell
-./scripts/run.sh demo       # automated demo (no MinIO required)
+./scripts/run.sh demo       # automated demo
 ./scripts/run.sh test       # JUnit 5 suite
 ./scripts/run.sh bench      # JMH benchmarks
-./scripts/run.sh shell-cold # with cold tier (starts MinIO via Homebrew)
+./scripts/run.sh serve      # HTTP server on $PORT (default 8080)
 ```
+
+---
+
+## Deploying to Google Cloud Run
+
+The project ships with a one-command deploy script that builds the image with Cloud Build (no local Docker needed) and deploys it to Cloud Run's always-free tier.
+
+```bash
+# Prerequisites: gcloud CLI installed and authenticated (gcloud auth login),
+# and a GCP project with billing enabled (required to enable the APIs below,
+# even though the deployment itself stays within the free tier).
+
+./deploy/cloudrun-deploy.sh YOUR_GCP_PROJECT_ID [REGION]
+# REGION defaults to us-central1
+```
+
+This enables the Cloud Run, Artifact Registry, and Cloud Build APIs, builds the image, and deploys it running in `serve` mode (the HTTP wrapper), scaling to zero when idle. At the end it prints the public service URL.
+
+Once deployed:
+```bash
+curl https://YOUR-SERVICE-URL/healthz
+curl -X POST "https://YOUR-SERVICE-URL/write?key=cassandra&col=version&val=5.0"
+curl "https://YOUR-SERVICE-URL/read?key=cassandra"
+curl "https://YOUR-SERVICE-URL/stats"
+```
+
+**Storage is ephemeral** — each new revision or scale-to-zero cold start begins with an empty CommitLog/MemTable/SSTables, since data lives on container-local disk. That's expected for a demo/portfolio deployment like this one, not a place to keep data you care about.
 
 ---
 
@@ -304,6 +321,3 @@ A dense index for 10M partitions at 32 bytes/entry = 320MB — more than our ent
 
 **Why Bloom filter before index lookup?**
 At 1% FPP, 99% of non-existent key lookups are eliminated before touching the index file. For read-heavy workloads with high miss rates (e.g., cache miss path), this is the single most impactful optimisation in the entire read path.
-
-**Why MinIO for cold tier?**
-MinIO is S3-compatible, runs as a single binary (no Docker required locally), and is the same API that Instaclustr's platform uses for tiered storage on AWS. The `MINIO_ENDPOINT` environment variable allows the same code to connect to real AWS S3 by changing one line in `docker-compose.yml`.

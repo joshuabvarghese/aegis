@@ -42,9 +42,8 @@ public final class AegisHttpServer {
 
     public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
-        boolean coldTier = java.util.Arrays.asList(args).contains("--cold-tier");
 
-        engine = new StorageEngine(coldTier);
+        engine = new StorageEngine();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try { engine.close(); } catch (IOException ignored) {}
         }));
@@ -59,8 +58,7 @@ public final class AegisHttpServer {
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
 
-        System.out.println("[aegis-http] Listening on :" + port
-            + " (coldTier=" + coldTier + ")");
+        System.out.println("[aegis-http] Listening on :" + port);
     }
 
     // ─── Handlers ──────────────────────────────────────────────────────────────
@@ -145,15 +143,15 @@ public final class AegisHttpServer {
         var s = engine.stats();
         String json = """
             {"totalWrites":%d,"totalReads":%d,"readHitsMemtable":%d,"readHitsSStable":%d,\
-            "readHitsColdTier":%d,"readMisses":%d,"readHitRatio":%.4f,"flushCount":%d,\
+            "readMisses":%d,"readHitRatio":%.4f,"flushCount":%d,\
             "activeMemTableRows":%d,"activeMemTableBytes":%d,"sstableCount":%d,\
             "compactionsRun":%d,"tombstonesPurged":%d,"bytesReclaimed":%d,\
-            "coldTierOffloaded":%d,"commitLogWrites":%d}""".formatted(
+            "commitLogWrites":%d}""".formatted(
             s.totalWrites(), s.totalReads(), s.readHitsMemtable(), s.readHitsSStable(),
-            s.readHitsColdTier(), s.readMisses(), s.readHitRatio(), s.flushCount(),
+            s.readMisses(), s.readHitRatio(), s.flushCount(),
             s.activeMemTableRows(), s.activeMemTableBytes(), s.sstableCount(),
             s.compactionsRun(), s.tombstonesPurged(), s.bytesReclaimed(),
-            s.coldTierOffloaded(), s.commitLogWrites());
+            s.commitLogWrites());
         respond(ex, 200, "application/json", json);
     }
 

@@ -618,7 +618,7 @@ class StorageEngineTest {
         @DisplayName("Write then read from MemTable returns correct value")
         void writeReadMemTable() throws Exception {
             overrideDataPaths(tempDir);
-            try (StorageEngine engine = new StorageEngine(false)) {
+            try (StorageEngine engine = new StorageEngine()) {
                 engine.write("cassandra", "type", "wide-column");
                 Optional<Row> result = engine.read("cassandra");
                 assertTrue(result.isPresent());
@@ -630,7 +630,7 @@ class StorageEngineTest {
         @DisplayName("Flush makes data readable from SSTable, not just MemTable")
         void writeFlushRead() throws Exception {
             overrideDataPaths(tempDir);
-            try (StorageEngine engine = new StorageEngine(false)) {
+            try (StorageEngine engine = new StorageEngine()) {
                 engine.write("kafka", "version", "3.8");
                 engine.forceFlush();
                 Thread.sleep(300);
@@ -645,7 +645,7 @@ class StorageEngineTest {
         @DisplayName("Tombstone masks earlier value across MemTable + SSTable")
         void tombstoneMasksEarlierValue() throws Exception {
             overrideDataPaths(tempDir);
-            try (StorageEngine engine = new StorageEngine(false)) {
+            try (StorageEngine engine = new StorageEngine()) {
                 engine.write("toDelete", "col", "original");
                 engine.forceFlush();
                 Thread.sleep(300);
@@ -670,7 +670,7 @@ class StorageEngineTest {
         @DisplayName("Missing key returns empty after MemTable and SSTable checks")
         void missingKeyReturnsEmpty() throws Exception {
             overrideDataPaths(tempDir);
-            try (StorageEngine engine = new StorageEngine(false)) {
+            try (StorageEngine engine = new StorageEngine()) {
                 engine.write("exists", "col", "val");
                 Optional<Row> missing = engine.read("definitely-does-not-exist-key-xyz");
                 assertTrue(missing.isEmpty());
@@ -681,7 +681,7 @@ class StorageEngineTest {
         @DisplayName("Stats report correct write and read counts")
         void statsAreAccurate() throws Exception {
             overrideDataPaths(tempDir);
-            try (StorageEngine engine = new StorageEngine(false)) {
+            try (StorageEngine engine = new StorageEngine()) {
                 for (int i = 0; i < 10; i++) engine.write("k" + i, "c", "v");
                 for (int i = 0; i < 5; i++)  engine.read("k" + i);
 

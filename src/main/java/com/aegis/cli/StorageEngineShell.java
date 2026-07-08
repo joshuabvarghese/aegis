@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.*;
  *
  * This is the demo entry point. It gives an interviewer a live window into
  * every layer of the LSM-tree — from CommitLog append through MemTable,
- * SSTable flush, STCS compaction, and cold-tier offload.
+ * SSTable flush, and STCS compaction.
  *
  * ─── Commands ────────────────────────────────────────────────────────────────
  *
@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.*;
  *   3. READ PATH:  read a key, show Bloom filter hit, index lookup, data read
  *   4. TOMBSTONE:  delete a key, read it back (tombstone returned, not old value)
  *   5. COMPACTION: write 4 more flush cycles, trigger STCS, show merge stats
- *   6. COLD TIER:  (if MinIO running) show SSTable offload and transparent remote read
+ *   6. STATS:      print full engine metrics
  */
 public final class StorageEngineShell {
 
@@ -50,15 +50,12 @@ public final class StorageEngineShell {
         System.setProperty("java.util.logging.SimpleFormatter.format",
             "[%4$s] %5$s%n");
 
-        boolean coldTier = Arrays.asList(args).contains("--cold-tier");
-
         printBanner();
         System.out.println("  Booting storage engine...");
 
-        engine = new StorageEngine(coldTier);
+        engine = new StorageEngine();
 
         System.out.println("  Engine ready. CommitLog + MemTable active.");
-        if (coldTier) System.out.println("  Cold tier enabled (MinIO at " + StorageConfig.minioEndpoint() + ")");
         System.out.println();
         System.out.println("  Type 'demo' to run the full automated demo, or 'help' for commands.");
         System.out.println();
@@ -327,7 +324,7 @@ public final class StorageEngineShell {
         System.out.println();
         System.out.println("  ┌─────────────────────────────────────────────────────────┐");
         System.out.println("  │         AEGIS-STORAGE — LSM-Tree Storage Engine          │");
-        System.out.println("  │   CommitLog → MemTable → SSTable → Compaction → MinIO   │");
+        System.out.println("  │      CommitLog → MemTable → SSTable → Compaction         │");
         System.out.println("  │        Cassandra internals, built from scratch           │");
         System.out.println("  └─────────────────────────────────────────────────────────┘");
         System.out.println();

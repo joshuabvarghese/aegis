@@ -10,7 +10,6 @@ import com.aegis.memtable.MemTable;
 import com.aegis.sstable.SSTableReader;
 import com.aegis.sstable.SSTableWriter;
 import com.aegis.sstable.SSTableWriter.SSTableMetadata;
-import com.aegis.tiering.ColdTierManager;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -48,21 +47,14 @@ import java.util.stream.Stream;
  *     │
  *     ├─► 1. activeMemTable.get(key)         O(log n) skip-list lookup
  *     ├─► 2. flushingMemTable.get(key)        if one exists (being flushed)
- *     ├─► 3. for each SSTable (newest first):
- *     │         bloomFilter.mightContain(key) O(k) — skip if false
- *     │         binarySearch(index, key)      find data offset
- *     │         readPartition(dataOffset)     single random I/O
- *     └─► 4. Cold tier lookup                if not found locally
+ *     └─► 3. for each SSTable (newest first):
+ *               bloomFilter.mightContain(key) O(k) — skip if false
+ *               binarySearch(index, key)      find data offset
+ *               readPartition(dataOffset)     single random I/O
  *
  * COMPACTION:
  *   Background Virtual Thread, fires every COMPACTION_CHECK_INTERVAL_MS.
  *   Calls STCSCompactor to merge SSTables when a size-tiered bucket is eligible.
- *
- * COLD TIER:
- *   Background Virtual Thread checks SSTable age.
- *   SSTables older than COLD_TIER_AGE_THRESHOLD_SECONDS are offloaded to MinIO.
- *   The local files are deleted; the SSTableMetadata is retained in the catalog
- *   with a remote URL so reads can transparently fetch from object storage.
  */
 public final class StorageEngine implements Closeable {
 
@@ -72,7 +64,6 @@ public final class StorageEngine implements Closeable {
 
     private final CommitLog       commitLog;
     private final STCSCompactor   compactor;
-    private final ColdTierManager coldTier;
 
     // MemTable management — read-write lock protects the swap from active → flushing
     private volatile MemTable     activeMemTable;
@@ -89,26 +80,17 @@ public final class StorageEngine implements Closeable {
     private final ScheduledExecutorService compactionScheduler =
         Executors.newSingleThreadScheduledExecutor(
             Thread.ofVirtual().name("compaction-daemon").factory());
-    private final ScheduledExecutorService tieringScheduler =
-        Executors.newSingleThreadScheduledExecutor(
-            Thread.ofVirtual().name("tiering-daemon").factory());
-
     // Global metrics
     private final AtomicLong totalWrites     = new AtomicLong(0);
     private final AtomicLong totalReads      = new AtomicLong(0);
     private final AtomicLong readHitsMemtable = new AtomicLong(0);
     private final AtomicLong readHitsSStable  = new AtomicLong(0);
-    private final AtomicLong readHitsColdTier = new AtomicLong(0);
     private final AtomicLong readMisses        = new AtomicLong(0);
     private final AtomicLong flushCount        = new AtomicLong(0);
 
-    private final boolean coldTierEnabled;
-
     // ─── Construction ─────────────────────────────────────────────────────────
 
-    public StorageEngine(boolean coldTierEnabled) throws IOException {
-        this.coldTierEnabled = coldTierEnabled;
-
+    public StorageEngine() throws IOException {
         // Initialise directories
         StorageConfig.commitLogDir().toFile().mkdirs();
         StorageConfig.ssTableDir().toFile().mkdirs();
@@ -129,15 +111,11 @@ public final class StorageEngine implements Closeable {
         // Boot compactor
         this.compactor = new STCSCompactor(StorageConfig.ssTableDir(), generationGen);
 
-        // Boot cold tier
-        this.coldTier = coldTierEnabled ? new ColdTierManager() : null;
-
         // Start background daemons
         startCompactionDaemon();
-        if (coldTierEnabled) startTieringDaemon();
 
-        log.info("[ENGINE] StorageEngine started. sstables=%d coldTier=%b"
-            .formatted(sstableCatalog.size(), coldTierEnabled));
+        log.info("[ENGINE] StorageEngine started. sstables=%d"
+            .formatted(sstableCatalog.size()));
     }
 
     // ─── Write Path ───────────────────────────────────────────────────────────
@@ -196,7 +174,6 @@ public final class StorageEngine implements Closeable {
      *
      * Implements the full Cassandra read path:
      *   MemTable → (flushing MemTable) → SSTables (Bloom filter → Index → Data)
-     *     → Cold Tier
      *
      * Returns the reconciled row, or Optional.empty() if the key does not exist.
      */
@@ -231,7 +208,7 @@ public final class StorageEngine implements Closeable {
                     key.compareTo(meta.maxKey()) > 0) continue;
             }
 
-            if (!meta.dataPath().toFile().exists()) continue; // offloaded to cold tier
+            if (!meta.dataPath().toFile().exists()) continue; // data file missing, skip
 
             try (SSTableReader reader = new SSTableReader(meta)) {
                 Optional<Row> sstResult = reader.get(key);
@@ -239,15 +216,6 @@ public final class StorageEngine implements Closeable {
                     readHitsSStable.incrementAndGet();
                     return sstResult;
                 }
-            }
-        }
-
-        // Step 3: Cold tier — only if enabled and key might be there
-        if (coldTierEnabled && coldTier != null) {
-            Optional<Row> coldResult = coldTier.read(key);
-            if (coldResult.isPresent()) {
-                readHitsColdTier.incrementAndGet();
-                return coldResult;
             }
         }
 
@@ -470,42 +438,13 @@ public final class StorageEngine implements Closeable {
         sstableCatalog.add(0, output);
     }
 
-    private void startTieringDaemon() {
-        tieringScheduler.scheduleAtFixedRate(() -> {
-            try {
-                runTieringCycle();
-            } catch (Exception e) {
-                log.warning("[TIERING] Cycle error: " + e.getMessage());
-            }
-        }, 5_000, 5_000, TimeUnit.MILLISECONDS);
-    }
-
-    private void runTieringCycle() {
-        if (coldTier == null) return;
-        long nowSeconds = System.currentTimeMillis() / 1_000L;
-
-        for (SSTableMetadata meta : new ArrayList<>(sstableCatalog)) {
-            if (!meta.dataPath().toFile().exists()) continue; // already offloaded
-            if (meta.ageSeconds() < StorageConfig.COLD_TIER_AGE_THRESHOLD_SECONDS) continue;
-
-            try {
-                coldTier.offload(meta);
-                log.info("[TIERING] Offloaded SSTable gen=%d to cold tier"
-                    .formatted(meta.generation()));
-            } catch (Exception e) {
-                log.warning("[TIERING] Offload failed gen=%d: %s"
-                    .formatted(meta.generation(), e.getMessage()));
-            }
-        }
-    }
-
     // ─── Metrics ──────────────────────────────────────────────────────────────
 
     public EngineStats stats() {
         return new EngineStats(
             totalWrites.get(), totalReads.get(),
             readHitsMemtable.get(), readHitsSStable.get(),
-            readHitsColdTier.get(), readMisses.get(),
+            readMisses.get(),
             flushCount.get(),
             activeMemTable.rowCount(),
             activeMemTable.estimatedSizeBytes(),
@@ -513,7 +452,6 @@ public final class StorageEngine implements Closeable {
             compactor.compactionsRun(),
             compactor.tombstonesPurged(),
             compactor.bytesReclaimed(),
-            coldTierEnabled && coldTier != null ? coldTier.offloadedCount() : 0,
             commitLog.totalWrites()
         );
     }
@@ -521,7 +459,7 @@ public final class StorageEngine implements Closeable {
     public record EngineStats(
         long totalWrites, long totalReads,
         long readHitsMemtable, long readHitsSStable,
-        long readHitsColdTier, long readMisses,
+        long readMisses,
         long flushCount,
         int  activeMemTableRows,
         long activeMemTableBytes,
@@ -529,11 +467,10 @@ public final class StorageEngine implements Closeable {
         long compactionsRun,
         long tombstonesPurged,
         long bytesReclaimed,
-        long coldTierOffloaded,
         long commitLogWrites
     ) {
         public double readHitRatio() {
-            long hits = readHitsMemtable + readHitsSStable + readHitsColdTier;
+            long hits = readHitsMemtable + readHitsSStable;
             return totalReads == 0 ? 0.0 : (double) hits / totalReads;
         }
 
@@ -544,14 +481,13 @@ public final class StorageEngine implements Closeable {
             System.out.printf( "│  Writes:     %-10d  CommitLog writes: %-10d    │%n", totalWrites, commitLogWrites);
             System.out.printf( "│  Reads:      %-10d  Hit ratio:        %.1f%%              │%n", totalReads, readHitRatio()*100);
             System.out.printf( "│  MemTable:   %-6d hits    SSTables: %-6d hits          │%n", readHitsMemtable, readHitsSStable);
-            System.out.printf( "│  Cold tier:  %-6d hits    Misses:   %-6d               │%n", readHitsColdTier, readMisses);
+            System.out.printf( "│  Misses:     %-6d                                       │%n", readMisses);
             System.out.println("├─────────────────────────────────────────────────────────┤");
             System.out.printf( "│  Active MemTable: %d rows / %d KB                        │%n", activeMemTableRows, activeMemTableBytes/1024);
             System.out.printf( "│  SSTables:        %d on disk                             │%n", sstableCount);
             System.out.printf( "│  Flushes:         %d                                     │%n", flushCount);
             System.out.printf( "│  Compactions:     %d  tombstones purged: %d              │%n", compactionsRun, tombstonesPurged);
             System.out.printf( "│  Bytes reclaimed: %d KB                                  │%n", bytesReclaimed/1024);
-            System.out.printf( "│  Cold offloaded:  %d SSTables                            │%n", coldTierOffloaded);
             System.out.println("└─────────────────────────────────────────────────────────┘");
         }
     }
@@ -559,10 +495,8 @@ public final class StorageEngine implements Closeable {
     @Override
     public void close() throws IOException {
         compactionScheduler.shutdown();
-        tieringScheduler.shutdown();
         flushExecutor.shutdown();
         commitLog.close();
-        if (coldTier != null) coldTier.close();
         log.info("[ENGINE] StorageEngine shut down.");
     }
 }

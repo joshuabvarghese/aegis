@@ -87,7 +87,7 @@ public class StorageBenchmark {
         }
 
         // Full engine (no cold tier — isolates local path)
-        this.engine = new StorageEngine(false);
+        this.engine = new StorageEngine();
     }
 
     @TearDown(Level.Trial)

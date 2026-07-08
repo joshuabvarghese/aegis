@@ -69,7 +69,7 @@ public final class MemTable {
     private volatile Status status = Status.ACTIVE;
     private final ReentrantReadWriteLock statusLock = new ReentrantReadWriteLock();
 
-    // Creation timestamp — used for cold-tier age calculations
+    // Creation timestamp — used for SSTable age tracking
     private final long createdAtMs = System.currentTimeMillis();
 
     public MemTable(long id) {
