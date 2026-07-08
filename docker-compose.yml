@@ -29,7 +29,7 @@ services:
     container_name: aegis-engine
     image: aegis-storage:latest
     environment:
-      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleFormatter.format=[%4$$s] %5$$s%n"
+      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC"
     volumes:
       - engine-data:/data
     stdin_open: true
@@ -61,7 +61,7 @@ services:
     container_name: aegis-bench
     image: aegis-storage:latest
     environment:
-      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleFormatter.format=[%4$$s] %5$$s%n"
+      JAVA_OPTS: "--enable-preview -Xmx256m -XX:+UseZGC"
     volumes:
       - bench-data:/data
     command: bench

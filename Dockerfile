@@ -60,7 +60,7 @@ USER aegis
 
 # --enable-preview goes here, on the JVM — this is correct.
 # The $ signs are escaped so Docker doesn't try to expand them as shell variables.
-ENV JAVA_OPTS="--enable-preview -Xmx256m -XX:+UseZGC -Djava.util.logging.SimpleFormatter.format=[%4\$s] %5\$s%n"
+ENV JAVA_OPTS="--enable-preview -Xmx256m -XX:+UseZGC"
 ENV AEGIS_DATA_DIR="/data"
 
 EXPOSE 8888
