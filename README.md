@@ -10,8 +10,8 @@ CommitLog → MemTable → SSTable flush → Size-Tiered Compaction. Built in Ja
 ## One-command demo
 
 ```bash
-git clone https://github.com/joshuabvarghese/aegis-storage
-cd aegis-storage
+git clone https://github.com/joshuabvarghese/aegis
+cd aegis
 docker compose run --rm demo
 ```
 
@@ -54,7 +54,7 @@ docker compose run --rm engine
   │  ├── {gen}-Filter.db      Bloom filter (1% FPP)         │
   │  ├── {gen}-Statistics.db  metadata + CommitLog pos      │
   │  └── {gen}-Summary.db     sampled index summary         │
-  └───────────────────────────────────────────────────────────┘
+  └─────────────────────────────────────────────────────────┘
 
                           READ PATH
                           ─────────
