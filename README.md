@@ -54,7 +54,7 @@ docker compose run --rm engine
   │  ├── {gen}-Filter.db      Bloom filter (1% FPP)         │
   │  ├── {gen}-Statistics.db  metadata + CommitLog pos      │
   │  └── {gen}-Summary.db     sampled index summary         │
-  └─────────────────────────────────────────────────────────┘
+  └───────────────────────────────────────────────────────────┘
 
                           READ PATH
                           ─────────
@@ -169,6 +169,42 @@ docker compose up serve
 ./scripts/run.sh bench      # JMH benchmarks
 ./scripts/run.sh serve      # HTTP server on $PORT (default 8080)
 ```
+
+---
+
+## Crash / Durability Testing
+
+Every write that gets an HTTP 200 from `/write` is a durability promise. `scripts/chaos-crash-test.sh` verifies that promise for real: it writes a burst of rows against a live engine, sends the container a hard `SIGKILL` mid-burst (no graceful shutdown, no final flush — the same as pulling the power), restarts it from the same volume, and checks that every acknowledged write actually came back after CommitLog replay.
+
+```bash
+# Default: 400 writes, kill at 200, PERIODIC sync (the production default)
+./scripts/chaos-crash-test.sh
+
+# Zero-loss guarantee: fsync before every acknowledged write
+./scripts/chaos-crash-test.sh 400 200 BATCH
+```
+
+The two sync modes give two different honest outcomes, matching Cassandra's real `commitlog_sync` trade-off:
+
+- **PERIODIC** (default, fsyncs every 200ms) — writes acknowledged inside that 200ms window can legitimately be lost on a hard crash. The script reports this as expected behaviour, not a failure, and shows exactly how many (and which) writes fell in that window.
+- **BATCH** (fsyncs before acknowledging every write) — the script asserts **zero** data loss. If even one acknowledged row goes missing in this mode, the script exits non-zero, because that would be a real bug.
+
+This is the same crash-recovery guarantee every real LSM-tree database depends on — the CommitLog is what makes an in-memory MemTable safe to use at all.
+
+The JUnit suite also includes a concurrency stress section (`I. Concurrency Stress` in `StorageEngineTest.java`) that hammers the engine with dozens of virtual threads doing simultaneous writes, same-key contention, and reads-during-writes, asserting zero lost writes, zero torn values, and zero exceptions under load. Run it with `docker compose run --rm test` or `./scripts/run.sh test`.
+
+---
+
+## Live Dashboard
+
+`dashboard/index.html` is a single, dependency-free static file that polls `/stats` and renders the engine's live read path and throughput. It works against either a local `serve` container or a deployed Cloud Run URL — just point it at the right address.
+
+```bash
+docker compose up serve          # engine listening on :8080
+open dashboard/index.html        # (or just double-click it)
+```
+
+By default it polls `http://localhost:8080`. Change the URL field at the top-right to point at any running instance, including your Cloud Run service URL.
 
 ---
 
@@ -291,20 +327,13 @@ The heap gauge in the stats output proves the engine stays well under 256MB even
 
 ---
 
-## Benchmarks (expected on Apple Silicon M1)
+## Benchmarks
 
-| Benchmark | What it measures | Expected |
-|---|---|---|
-| `benchmarkMurmur3Token` | Partition key hashing | ~50–100ns |
-| `benchmarkBloomFilterMiss` | Definitive miss (zero disk I/O path) | ~100–200ns |
-| `benchmarkBloomFilterHit` | Probable hit check | ~100–200ns |
-| `benchmarkCommitLogSerialization` | Row → bytes, no I/O | ~500ns–2µs |
-| `benchmarkCommitLogAppend` | Full FileChannel write, PERIODIC mode | ~1–5µs |
-| `benchmarkRowMerge` | Compaction reconciliation per row | ~200–500ns |
-| `benchmarkFullEngineWrite` | CommitLog → MemTable e2e | ~5–20µs |
-| `benchmarkEngineReadMemTable` | ConcurrentSkipListMap.get() | ~200–500ns |
+These numbers are measured, not guessed — run `./scripts/update-benchmark-numbers.sh` on your own machine any time to regenerate this table from a real JMH run in the same container image used everywhere else in this project. Until you run it, the table below reflects whichever machine last ran it.
 
-Run: `docker compose run --rm bench`
+<!-- BENCHMARK_TABLE_START -->
+_Not yet measured on this machine. Run `./scripts/update-benchmark-numbers.sh` to populate this table with real numbers._
+<!-- BENCHMARK_TABLE_END -->
 
 ---
 

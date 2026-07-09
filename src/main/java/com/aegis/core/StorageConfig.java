@@ -32,10 +32,16 @@ public final class StorageConfig {
 
     /**
      * Cassandra supports two sync modes: PERIODIC (ack before fsync, risk up to
-     * sync_period of data loss) and BATCH (fsync before ack, zero data loss, lower
-     * throughput). We implement PERIODIC — the production default.
+     * sync_period of data loss on a crash — higher throughput) and BATCH (fsync
+     * before ack, zero data loss, lower throughput). Both are implemented.
+     * Overridable via the COMMITLOG_SYNC_MODE environment variable, so the same
+     * JAR can demonstrate either trade-off without a rebuild.
      */
-    public static final CommitLogSyncMode COMMITLOG_SYNC_MODE = CommitLogSyncMode.PERIODIC;
+    public static CommitLogSyncMode commitLogSyncMode() {
+        String env = System.getenv("COMMITLOG_SYNC_MODE");
+        if (env != null && env.equalsIgnoreCase("BATCH")) return CommitLogSyncMode.BATCH;
+        return CommitLogSyncMode.PERIODIC;
+    }
 
     public enum CommitLogSyncMode { PERIODIC, BATCH }
 

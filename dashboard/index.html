@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>aegis-storage :: live</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --void:      #0a0d12;
+    --panel:     #12161d;
+    --panel-hi:  #171c26;
+    --hairline:  #262c38;
+    --text:      #dce1e8;
+    --dim:       #6b7280;
+    --dimmer:    #454c58;
+    --mem:       #5fb88f;
+    --sstable:   #d9a25c;
+    --miss:      #c96a5a;
+    --compact:   #7c9fd1;
+    --ok:        #5fb88f;
+    --bad:       #c96a5a;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--void);
+    color: var(--text);
+    font-family: var(--mono);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { min-height: 100vh; padding: 28px 20px 60px; }
+
+  .wrap { max-width: 1060px; margin: 0 auto; }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 14px;
+    padding-bottom: 18px; margin-bottom: 22px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .brand { display: flex; align-items: baseline; gap: 12px; }
+  .brand h1 {
+    font-size: 17px; font-weight: 700; letter-spacing: 0.06em;
+    margin: 0; color: var(--text);
+  }
+  .brand h1 .dim-part { color: var(--dim); font-weight: 500; }
+  .brand .tag {
+    font-size: 11px; color: var(--dim); letter-spacing: 0.04em;
+  }
+
+  .conn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .conn input {
+    background: var(--panel); border: 1px solid var(--hairline);
+    color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 7px 10px; border-radius: 3px; width: 220px;
+    outline: none;
+  }
+  .conn input:focus { border-color: var(--dimmer); }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim); }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dimmer);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px 1px rgba(95,184,143,0.55); }
+  .dot.down { background: var(--bad); box-shadow: 0 0 8px 1px rgba(201,106,90,0.5); }
+
+  /* ── Tiles ──────────────────────────────────────────── */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  @media (max-width: 900px) { .tiles { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 520px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    padding: 12px 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .tile::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--accent, var(--dimmer));
+    opacity: 0.85;
+  }
+  .tile .label {
+    font-size: 10px; letter-spacing: 0.08em; color: var(--dim);
+    text-transform: uppercase; margin-bottom: 6px;
+  }
+  .tile .value {
+    font-size: 21px; font-weight: 700; color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tile .value .unit { font-size: 12px; color: var(--dim); font-weight: 500; margin-left: 3px; }
+
+  /* ── Panels ─────────────────────────────────────────── */
+  .panels {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 800px) { .panels { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    padding: 16px 18px 18px;
+  }
+  .panel h2 {
+    font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 16px; font-weight: 600;
+  }
+  .panel h2 .sub { text-transform: none; letter-spacing: 0; color: var(--dimmer); margin-left: 8px; }
+
+  /* ── Read path diagram ──────────────────────────────── */
+  .path {
+    display: flex; align-items: stretch; gap: 6px;
+  }
+  .path-stage {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    text-align: center; gap: 8px;
+  }
+  .path-box {
+    width: 100%;
+    border: 1px solid var(--hairline);
+    background: var(--panel-hi);
+    border-radius: 4px;
+    padding: 14px 8px 12px;
+    position: relative;
+    transition: border-color 0.4s, box-shadow 0.4s;
+  }
+  .path-box .n {
+    font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .path-box .pct { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .path-box .lbl {
+    font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--dim); margin-top: 8px;
+  }
+  .path-box.pulse {
+    box-shadow: 0 0 0 1px var(--flash-color), 0 0 14px 0 var(--flash-color);
+    border-color: var(--flash-color);
+  }
+  .path-arrow {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dimmer); font-size: 14px; width: 18px; flex-shrink: 0;
+    padding-top: 30px;
+  }
+  .path-box[data-tier="mem"]    .n { color: var(--mem); }
+  .path-box[data-tier="sstable"] .n { color: var(--sstable); }
+  .path-box[data-tier="miss"]   .n { color: var(--miss); }
+
+  .path-bar {
+    height: 5px; border-radius: 3px; overflow: hidden;
+    display: flex; margin-top: 14px;
+    border: 1px solid var(--hairline);
+  }
+  .path-bar div { height: 100%; transition: width 0.5s ease; }
+
+  /* ── Sparkline ──────────────────────────────────────── */
+  .spark-legend {
+    display: flex; gap: 16px; font-size: 11px; color: var(--dim); margin-top: 10px;
+  }
+  .spark-legend span { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+  canvas { width: 100%; display: block; }
+
+  /* ── Footer / empty state ───────────────────────────── */
+  .foot {
+    margin-top: 18px; font-size: 11px; color: var(--dimmer);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+  .empty {
+    padding: 40px 10px; text-align: center; color: var(--dim); font-size: 13px;
+  }
+  .empty .big { font-size: 15px; color: var(--text); margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <h1>AEGIS<span class="dim-part">-STORAGE</span></h1>
+      <div class="tag">live engine metrics</div>
+    </div>
+    <div class="conn">
+      <input id="url" type="text" value="http://localhost:8080" spellcheck="false" />
+      <div class="status"><span id="dot" class="dot"></span><span id="statusText">connecting&hellip;</span></div>
+    </div>
+  </header>
+
+  <div class="tiles">
+    <div class="tile" style="--accent: var(--mem)">
+      <div class="label">Writes</div>
+      <div class="value" id="t-writes">&mdash;</div>
+    </div>
+    <div class="tile" style="--accent: var(--sstable)">
+      <div class="label">Reads</div>
+      <div class="value" id="t-reads">&mdash;</div>
+    </div>
+    <div class="tile" style="--accent: var(--ok)">
+      <div class="label">Hit Ratio</div>
+      <div class="value" id="t-hitratio">&mdash;</div>
+    </div>
+    <div class="tile" style="--accent: var(--sstable)">
+      <div class="label">SSTables</div>
+      <div class="value" id="t-sstables">&mdash;</div>
+    </div>
+    <div class="tile" style="--accent: var(--compact)">
+      <div class="label">Compactions</div>
+      <div class="value" id="t-compactions">&mdash;</div>
+    </div>
+    <div class="tile" style="--accent: var(--miss)">
+      <div class="label">Reclaimed</div>
+      <div class="value" id="t-reclaimed">&mdash;</div>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2>Read Path <span class="sub">where the last poll's reads were served from</span></h2>
+
+      <div id="pathDiagram">
+        <div class="path">
+          <div class="path-stage">
+            <div class="path-box" data-tier="mem" id="box-mem">
+              <div class="n" id="n-mem">0</div>
+              <div class="pct" id="p-mem">0%</div>
+              <div class="lbl">MemTable</div>
+            </div>
+          </div>
+          <div class="path-arrow">&rarr;</div>
+          <div class="path-stage">
+            <div class="path-box" data-tier="sstable" id="box-sstable">
+              <div class="n" id="n-sstable">0</div>
+              <div class="pct" id="p-sstable">0%</div>
+              <div class="lbl">SSTables</div>
+            </div>
+          </div>
+          <div class="path-arrow">&rarr;</div>
+          <div class="path-stage">
+            <div class="path-box" data-tier="miss" id="box-miss">
+              <div class="n" id="n-miss">0</div>
+              <div class="pct" id="p-miss">0%</div>
+              <div class="lbl">Miss</div>
+            </div>
+          </div>
+        </div>
+        <div class="path-bar" id="pathBar">
+          <div style="width:33%; background: var(--mem)"></div>
+          <div style="width:33%; background: var(--sstable)"></div>
+          <div style="width:34%; background: var(--miss)"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Throughput <span class="sub">writes &amp; reads / sec</span></h2>
+      <canvas id="spark" width="460" height="150"></canvas>
+      <div class="spark-legend">
+        <span><i class="swatch" style="background:var(--mem)"></i>writes/sec</span>
+        <span><i class="swatch" style="background:var(--sstable)"></i>reads/sec</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span id="lastUpdated">no data yet</span>
+    <span>polling every 1.5s &middot; run <code>docker compose up serve</code> to expose the engine on :8080</span>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const urlInput   = $('url');
+  const dot        = $('dot');
+  const statusText = $('statusText');
+
+  const POLL_MS = 1500;
+  const HISTORY = 60; // ~90s of sparkline history
+
+  let prevStats = null;
+  let prevTime  = null;
+  const writeHistory = [];
+  const readHistory  = [];
+
+  function fmt(n) {
+    if (n === undefined || n === null) return '—';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function fmtBytes(n) {
+    if (n >= 1_048_576) return (n / 1_048_576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  function setStatus(ok) {
+    dot.className = 'dot ' + (ok ? 'live' : 'down');
+    statusText.textContent = ok ? 'connected' : 'unreachable';
+  }
+
+  function pulse(el) {
+    el.classList.remove('pulse');
+    // force reflow so the animation can restart
+    void el.offsetWidth;
+    el.classList.add('pulse');
+    setTimeout(() => el.classList.remove('pulse'), 900);
+  }
+
+  function updateTiles(s) {
+    $('t-writes').innerHTML       = fmt(s.totalWrites);
+    $('t-reads').innerHTML        = fmt(s.totalReads);
+    $('t-hitratio').innerHTML     = (s.readHitRatio * 100).toFixed(1) + '<span class="unit">%</span>';
+    $('t-sstables').innerHTML     = s.sstableCount;
+    $('t-compactions').innerHTML  = s.compactionsRun;
+    $('t-reclaimed').innerHTML    = fmtBytes(s.bytesReclaimed);
+  }
+
+  function updatePathDiagram(s, deltas) {
+    const mem = s.readHitsMemtable, sst = s.readHitsSStable, miss = s.readMisses;
+    const total = Math.max(mem + sst + miss, 1);
+
+    $('n-mem').textContent = fmt(mem);
+    $('n-sstable').textContent = fmt(sst);
+    $('n-miss').textContent = fmt(miss);
+
+    $('p-mem').textContent = Math.round((mem / total) * 100) + '%';
+    $('p-sstable').textContent = Math.round((sst / total) * 100) + '%';
+    $('p-miss').textContent = Math.round((miss / total) * 100) + '%';
+
+    const bar = $('pathBar');
+    bar.children[0].style.width = Math.max((mem / total) * 100, 1) + '%';
+    bar.children[1].style.width = Math.max((sst / total) * 100, 1) + '%';
+    bar.children[2].style.width = Math.max((miss / total) * 100, 1) + '%';
+
+    // pulse whichever tier absorbed traffic since the last poll
+    if (deltas) {
+      if (deltas.mem > 0)  pulse($('box-mem'));
+      if (deltas.sst > 0)  pulse($('box-sstable'));
+      if (deltas.miss > 0) pulse($('box-miss'));
+    }
+  }
+
+  // ── Sparkline (plain canvas, no chart library — matches the engine's
+  //    own "zero framework dependencies" ethos) ──────────────────────
+  const canvas = $('spark');
+  const ctx = canvas.getContext('2d');
+
+  function drawSpark() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const all = writeHistory.concat(readHistory);
+    const max = Math.max(1, ...all);
+    const padTop = 10, padBottom = 18;
+    const plotH = h - padTop - padBottom;
+
+    // gridlines
+    ctx.strokeStyle = '#1c212b';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 2; i++) {
+      const y = padTop + (plotH / 2) * i;
+      ctx.beginPath();
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(w, y + 0.5);
+      ctx.stroke();
+    }
+
+    function drawLine(data, color) {
+      if (data.length < 2) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      data.forEach((v, i) => {
+        const x = (i / (HISTORY - 1)) * w;
+        const y = padTop + plotH - (v / max) * plotH;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    drawLine(writeHistory, '#5fb88f');
+    drawLine(readHistory,  '#d9a25c');
+
+    // baseline
+    ctx.strokeStyle = '#262c38';
+    ctx.beginPath();
+    ctx.moveTo(0, h - padBottom + 0.5);
+    ctx.lineTo(w, h - padBottom + 0.5);
+    ctx.stroke();
+
+    ctx.fillStyle = '#454c58';
+    ctx.font = '10px ' + getComputedStyle(document.body).fontFamily;
+    ctx.fillText(max.toFixed(1) + '/s peak', 4, 12);
+  }
+
+  function pushHistory(arr, val) {
+    arr.push(val);
+    if (arr.length > HISTORY) arr.shift();
+  }
+
+  async function poll() {
+    const base = urlInput.value.replace(/\/$/, '');
+    let s;
+    try {
+      const res = await fetch(base + '/stats', { cache: 'no-store' });
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      s = await res.json();
+      setStatus(true);
+    } catch (err) {
+      setStatus(false);
+      return;
+    }
+
+    const now = Date.now();
+    let deltas = null;
+
+    if (prevStats) {
+      const dtSec = Math.max((now - prevTime) / 1000, 0.001);
+      const dWrites = Math.max(s.totalWrites - prevStats.totalWrites, 0) / dtSec;
+      const dReads  = Math.max(s.totalReads  - prevStats.totalReads,  0) / dtSec;
+      pushHistory(writeHistory, dWrites);
+      pushHistory(readHistory, dReads);
+
+      deltas = {
+        mem:  s.readHitsMemtable - prevStats.readHitsMemtable,
+        sst:  s.readHitsSStable  - prevStats.readHitsSStable,
+        miss: s.readMisses       - prevStats.readMisses
+      };
+    }
+
+    updateTiles(s);
+    updatePathDiagram(s, deltas);
+    drawSpark();
+
+    $('lastUpdated').textContent = 'last updated ' + new Date(now).toLocaleTimeString();
+
+    prevStats = s;
+    prevTime  = now;
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+
+  urlInput.addEventListener('change', () => {
+    prevStats = null; prevTime = null;
+    writeHistory.length = 0; readHistory.length = 0;
+    poll();
+  });
+})();
+</script>
+</body>
+</html>

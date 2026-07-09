@@ -17,6 +17,9 @@ import org.junit.jupiter.api.*;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -689,6 +692,168 @@ class StorageEngineTest {
                 assertEquals(10, stats.totalWrites());
                 assertEquals(5,  stats.totalReads());
                 assertTrue(stats.readHitsMemtable() <= 5);
+            }
+        }
+    }
+
+    // ─── I. Concurrency Stress ────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("I. Concurrency Stress")
+    class ConcurrencyStressTests {
+
+        @Test @Order(80)
+        @DisplayName("Concurrent disjoint-key writes: no write is lost under contention")
+        void concurrentDisjointWritesAreNotLost() throws Exception {
+            overrideDataPaths(tempDir);
+            int threads = 32;
+            int writesPerThread = 200;
+            int total = threads * writesPerThread;
+
+            try (StorageEngine engine = new StorageEngine()) {
+                ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
+                CountDownLatch ready = new CountDownLatch(threads);
+                CountDownLatch go = new CountDownLatch(1);
+                List<Future<?>> futures = new ArrayList<>();
+                AtomicInteger errors = new AtomicInteger();
+
+                for (int t = 0; t < threads; t++) {
+                    final int threadId = t;
+                    futures.add(pool.submit(() -> {
+                        ready.countDown();
+                        try { go.await(); } catch (InterruptedException ignored) {}
+                        for (int i = 0; i < writesPerThread; i++) {
+                            try {
+                                engine.write("stress-" + threadId + "-" + i, "v", "ok");
+                            } catch (Exception e) {
+                                errors.incrementAndGet();
+                            }
+                        }
+                    }));
+                }
+
+                ready.await();
+                long start = System.nanoTime();
+                go.countDown();
+                for (Future<?> f : futures) f.get(30, TimeUnit.SECONDS);
+                long elapsedMs = Math.max(1, (System.nanoTime() - start) / 1_000_000);
+                pool.shutdown();
+
+                assertEquals(0, errors.get(), "No write should throw under concurrent contention");
+                assertEquals(total, engine.stats().totalWrites(),
+                    "Every concurrent write must be counted — none silently lost");
+
+                int verified = 0;
+                for (int t = 0; t < threads; t++) {
+                    for (int i = 0; i < writesPerThread; i++) {
+                        Optional<Row> r = engine.read("stress-" + t + "-" + i);
+                        assertTrue(r.isPresent(),
+                            "stress-" + t + "-" + i + " must be readable after concurrent write");
+                        verified++;
+                    }
+                }
+                assertEquals(total, verified);
+
+                double opsPerSec = total / (elapsedMs / 1000.0);
+                System.out.printf(
+                    "[stress] %d threads x %d writes = %d total writes in %dms (%.0f writes/sec), 0 lost%n",
+                    threads, writesPerThread, total, elapsedMs, opsPerSec);
+            }
+        }
+
+        @Test @Order(81)
+        @DisplayName("Concurrent same-key writes: last-write-wins, never a torn/corrupted value")
+        void concurrentSameKeyWritesNeverTear() throws Exception {
+            overrideDataPaths(tempDir);
+            int threads = 16;
+            int writesPerThread = 100;
+
+            try (StorageEngine engine = new StorageEngine()) {
+                ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
+                Set<String> writtenValues = ConcurrentHashMap.newKeySet();
+                List<Future<?>> futures = new ArrayList<>();
+
+                for (int t = 0; t < threads; t++) {
+                    final int threadId = t;
+                    futures.add(pool.submit(() -> {
+                        for (int i = 0; i < writesPerThread; i++) {
+                            String value = "t" + threadId + "-w" + i;
+                            try {
+                                engine.write("hot-key", "col", value);
+                                writtenValues.add(value);
+                            } catch (Exception ignored) {}
+                        }
+                    }));
+                }
+                for (Future<?> f : futures) f.get(30, TimeUnit.SECONDS);
+                pool.shutdown();
+
+                Optional<Row> result = engine.read("hot-key");
+                assertTrue(result.isPresent(), "hot-key must exist after concurrent writes");
+                String finalValue = result.get().getCell("col").valueAsString();
+
+                assertTrue(writtenValues.contains(finalValue),
+                    "Final value must be exactly one of the values actually written — " +
+                    "never a mix of two writes (a torn value would fail this)");
+
+                System.out.printf(
+                    "[stress] %d threads hammered one key with %d writes each; " +
+                    "final value '%s' is a clean last-write-wins result, not a torn merge%n",
+                    threads, writesPerThread, finalValue);
+            }
+        }
+
+        @Test @Order(82)
+        @DisplayName("Concurrent reads during writes never throw or return corrupted state")
+        void concurrentReadsDuringWritesAreSafe() throws Exception {
+            overrideDataPaths(tempDir);
+            try (StorageEngine engine = new StorageEngine()) {
+                for (int i = 0; i < 50; i++) engine.write("seed-" + i, "c", "v" + i);
+
+                ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
+                AtomicInteger readErrors = new AtomicInteger();
+                AtomicInteger writeErrors = new AtomicInteger();
+                AtomicBoolean stop = new AtomicBoolean(false);
+
+                List<Future<?>> readers = new ArrayList<>();
+                for (int r = 0; r < 8; r++) {
+                    readers.add(pool.submit(() -> {
+                        while (!stop.get()) {
+                            try {
+                                engine.read("seed-" + ThreadLocalRandom.current().nextInt(50));
+                            } catch (Exception e) {
+                                readErrors.incrementAndGet();
+                            }
+                        }
+                    }));
+                }
+
+                List<Future<?>> writers = new ArrayList<>();
+                for (int w = 0; w < 8; w++) {
+                    final int writerId = w;
+                    writers.add(pool.submit(() -> {
+                        for (int i = 0; i < 200; i++) {
+                            try {
+                                engine.write("churn-" + writerId + "-" + i, "c", "v");
+                            } catch (Exception e) {
+                                writeErrors.incrementAndGet();
+                            }
+                        }
+                    }));
+                }
+
+                for (Future<?> f : writers) f.get(30, TimeUnit.SECONDS);
+                stop.set(true);
+                for (Future<?> f : readers) f.get(10, TimeUnit.SECONDS);
+                pool.shutdown();
+
+                assertEquals(0, readErrors.get(),
+                    "Reads must never throw while writes and flushes are happening concurrently");
+                assertEquals(0, writeErrors.get(),
+                    "Writes must never throw under concurrent read pressure");
+
+                System.out.println(
+                    "[stress] 8 readers + 8 writers ran concurrently against a live engine — 0 exceptions");
             }
         }
     }

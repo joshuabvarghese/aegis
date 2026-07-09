@@ -97,7 +97,7 @@ public final class StorageEngine implements Closeable {
 
         // Boot CommitLog
         this.commitLog = new CommitLog(
-            StorageConfig.commitLogDir(), StorageConfig.COMMITLOG_SYNC_MODE);
+            StorageConfig.commitLogDir(), StorageConfig.commitLogSyncMode());
 
         // Create initial MemTable
         this.activeMemTable = new MemTable(generationGen.getAndIncrement());

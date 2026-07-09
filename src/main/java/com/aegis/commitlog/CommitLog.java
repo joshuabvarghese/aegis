@@ -112,6 +112,13 @@ public final class CommitLog implements Closeable {
         totalWrites.incrementAndGet();
         totalBytesWritten.addAndGet(row.estimatedSizeBytes());
 
+        if (syncMode == StorageConfig.CommitLogSyncMode.BATCH) {
+            // BATCH: fsync before acknowledging the write. Slower, but the
+            // caller's "ok" response is a real durability guarantee — the
+            // row will survive even a hard kill -9 the instant we return.
+            segment.fsync();
+        }
+
         // Roll to a new segment if this one is full
         if (segment.isFull()) {
             rollSegment();
