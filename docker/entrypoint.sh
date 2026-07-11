@@ -41,6 +41,7 @@ case "$MODE" in
             org.openjdk.jmh.Main \
             "com.aegis.benchmark.StorageBenchmark" \
             -f 1 -wi 3 -i 5 -tu us \
+            -rf json \
             -rff /data/benchmark-results.json
         echo "[entrypoint] Benchmark results written to /data/benchmark-results.json"
         cat /data/benchmark-results.json 2>/dev/null || true

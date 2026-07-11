@@ -80,6 +80,7 @@ run_bench() {
          org.openjdk.jmh.Main \
          "com.aegis.benchmark.StorageBenchmark" \
          -f 1 -wi 3 -i 5 -tu us \
+         -rf json \
          -rff aegis-benchmark-results.json
     success "Benchmark results: aegis-benchmark-results.json"
 }

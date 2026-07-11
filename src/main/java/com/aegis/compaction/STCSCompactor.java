@@ -55,7 +55,7 @@ import java.util.stream.Collectors;
  * This two-phase approach (write-then-delete) prevents data loss if the process
  * crashes mid-compaction — exactly how Cassandra handles it.
  */
-public final class STCSCompactor {
+public final class STCSCompactor implements CompactionStrategy {
 
     private static final Logger log = Logger.getLogger(STCSCompactor.class.getName());
 
@@ -68,6 +68,7 @@ public final class STCSCompactor {
     private final AtomicLong partitionsMerged    = new AtomicLong(0);
     private final AtomicLong tombstonesPurged    = new AtomicLong(0);
     private final AtomicLong bytesReclaimed      = new AtomicLong(0);
+    private final AtomicLong bytesWritten        = new AtomicLong(0);
 
     public STCSCompactor(Path sstableDir, AtomicLong generationGen) {
         this.sstableDir    = sstableDir;
@@ -222,6 +223,7 @@ public final class STCSCompactor {
         partitionsMerged.addAndGet(mergeMap.size());
         tombstonesPurged.addAndGet(tombstonesPurgedLocal);
         bytesReclaimed.addAndGet(inputBytes - outputMeta.dataSizeBytes());
+        bytesWritten.addAndGet(outputMeta.dataSizeBytes());
 
         log.info(("[COMPACTION] Complete. input=%d SSTables, output=gen%d, " +
             "partitions=%d, tombstonesPurged=%d, bytesReclaimed=%d")
@@ -312,6 +314,29 @@ public final class STCSCompactor {
         }
         log.info("[COMPACTION] Deleted input SSTable gen=%d".formatted(meta.generation()));
     }
+
+    // ─── CompactionStrategy interface ─────────────────────────────────────────
+
+    @Override
+    public Optional<CompactionPlan> plan(List<SSTableMetadata> catalog) {
+        if (catalog.size() < StorageConfig.STCS_MIN_THRESHOLD) return Optional.empty();
+
+        List<List<SSTableMetadata>> buckets = formBuckets(catalog);
+        return selectCompactionBucket(buckets)
+            .map(bucket -> new CompactionPlan(bucket, 0,
+                "size-tiered bucket, " + bucket.size() + " SSTables"));
+    }
+
+    @Override
+    public SSTableMetadata execute(CompactionPlan plan) throws IOException {
+        return compact(plan.inputs());
+    }
+
+    @Override
+    public long bytesWritten() { return bytesWritten.get(); }
+
+    @Override
+    public String strategyName() { return "STCS"; }
 
     // ─── Metrics ──────────────────────────────────────────────────────────────
 

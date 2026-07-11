@@ -283,6 +283,14 @@ public final class SSTableWriter implements Closeable {
      * Returns the SSTableMetadata describing this SSTable for the catalog.
      */
     public SSTableMetadata finish() throws IOException {
+        return finish(0);
+    }
+
+    /**
+     * Seal the SSTable at a specific level. Level 0 for a fresh flush or STCS
+     * output (unleveled); 1+ for LeveledCompactor output.
+     */
+    public SSTableMetadata finish(int level) throws IOException {
         // Force data and index files
         dataChannel.force(true);
         indexChannel.force(true);
@@ -298,7 +306,8 @@ public final class SSTableWriter implements Closeable {
             generation, baseDir, partitionCount, cellCount,
             minKey, maxKey, commitLogPosition,
             System.currentTimeMillis(), dataFilePosition,
-            bloomFilter != null ? bloomFilter.memorySizeBytes() : 0
+            bloomFilter != null ? bloomFilter.memorySizeBytes() : 0,
+            level
         );
         writeStatsFile(metadata);
 
@@ -343,7 +352,7 @@ public final class SSTableWriter implements Closeable {
         byte[] maxKeyBytes = meta.maxKey() != null ? meta.maxKey().bytes() : new byte[0];
 
         ByteBuffer buf = ByteBuffer.allocate(
-            8 + 8 + 8 + 8 + 8 + 8 + 2 + minKeyBytes.length + 2 + maxKeyBytes.length + 8 + 8
+            8 + 8 + 8 + 8 + 8 + 8 + 2 + minKeyBytes.length + 2 + maxKeyBytes.length + 8 + 8 + 4
         );
         buf.putLong(meta.generation());
         buf.putLong(meta.partitionCount());
@@ -357,6 +366,7 @@ public final class SSTableWriter implements Closeable {
         buf.put(maxKeyBytes);
         buf.putLong(meta.commitLogPosition().segmentId());
         buf.putLong(meta.commitLogPosition().position());
+        buf.putInt(meta.level());
         buf.flip();
 
         try (FileChannel fc = openWrite(statsPath)) {
@@ -388,6 +398,12 @@ public final class SSTableWriter implements Closeable {
     /**
      * Metadata describing a completed SSTable.
      * Stored in the Statistics.db file and cached in-memory by the SSTableManager.
+     *
+     * `level` is 0 for a fresh MemTable flush and for any STCS compaction output
+     * (STCS is deliberately unleveled — see STCSCompactor). LeveledCompactor
+     * assigns 1, 2, 3... and guarantees SSTables within the same level >= 1 never
+     * overlap in key range, which is what lets a leveled read skip straight to
+     * the one SSTable per level that could possibly contain a given key.
      */
     public record SSTableMetadata(
         long           generation,
@@ -399,7 +415,8 @@ public final class SSTableWriter implements Closeable {
         CommitLogPosition commitLogPosition,
         long           createdAtMs,
         long           dataSizeBytes,
-        long           bloomFilterSizeBytes
+        long           bloomFilterSizeBytes,
+        int            level
     ) {
         public Path dataPath()    { return baseDir.resolve(generation + "-Data.db"); }
         public Path indexPath()   { return baseDir.resolve(generation + "-Index.db"); }
@@ -411,10 +428,22 @@ public final class SSTableWriter implements Closeable {
             return (System.currentTimeMillis() - createdAtMs) / 1_000;
         }
 
+        /** True if this SSTable's [minKey, maxKey] range overlaps another's. Null keys are treated as "could contain anything" (conservative). */
+        public boolean overlaps(SSTableMetadata other) {
+            if (minKey == null || maxKey == null || other.minKey == null || other.maxKey == null) return true;
+            return minKey.compareTo(other.maxKey) <= 0 && other.minKey.compareTo(maxKey) <= 0;
+        }
+
+        /** True if key falls within this SSTable's [minKey, maxKey] range. */
+        public boolean mightContainKey(PartitionKey key) {
+            if (minKey == null || maxKey == null) return true;
+            return key.compareTo(minKey) >= 0 && key.compareTo(maxKey) <= 0;
+        }
+
         @Override
         public String toString() {
-            return "SSTable{gen=%d, partitions=%d, cells=%d, size=%dKB, age=%ds}"
-                .formatted(generation, partitionCount, cellCount,
+            return "SSTable{gen=%d, level=%d, partitions=%d, cells=%d, size=%dKB, age=%ds}"
+                .formatted(generation, level, partitionCount, cellCount,
                     dataSizeBytes / 1024, ageSeconds());
         }
     }

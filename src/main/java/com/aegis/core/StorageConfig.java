@@ -122,6 +122,55 @@ public final class StorageConfig {
      */
     public static final int COMPACTION_CHECK_INTERVAL_MS = 2_000;
 
+    /**
+     * Which compaction strategy the engine runs: STCS (default, Cassandra's
+     * default) or LCS (Leveled — RocksDB/LevelDB's default, also selectable in
+     * real Cassandra). Overridable via the COMPACTION_STRATEGY environment
+     * variable so the same JAR can demonstrate either without a rebuild.
+     */
+    public static CompactionStrategyKind compactionStrategy() {
+        // Property checked first so tests can override it in-process (same
+        // pattern as user.home for data paths) without touching env vars,
+        // which the JVM can't reliably mutate at runtime.
+        String prop = System.getProperty("COMPACTION_STRATEGY");
+        String value = (prop != null && !prop.isBlank()) ? prop : System.getenv("COMPACTION_STRATEGY");
+        if (value != null && value.equalsIgnoreCase("LCS")) return CompactionStrategyKind.LCS;
+        return CompactionStrategyKind.STCS;
+    }
+
+    public enum CompactionStrategyKind { STCS, LCS }
+
+    // ─── Leveled Compaction Strategy (LCS) ────────────────────────────────────
+
+    /**
+     * L0 is compacted into L1 once this many L0 SSTables have accumulated.
+     * L0 files can overlap in key range (they're raw flush output), so this
+     * mirrors STCS_MIN_THRESHOLD to keep the two strategies comparable at the
+     * same data volume.
+     */
+    public static final int LCS_L0_COMPACTION_TRIGGER = 4;
+
+    /**
+     * Target total size of L1. Each level above L1 targets
+     * LCS_LEVEL_SIZE_MULTIPLIER times the level below it — the same
+     * exponential level-size growth RocksDB and LevelDB use.
+     *
+     * Set small (128KB) relative to Cassandra's real defaults (~256MB) so a
+     * demo-scale dataset actually produces a multi-level tree instead of
+     * everything sitting in L1.
+     */
+    public static final long LCS_L1_MAX_BYTES = 128 * 1024L;
+
+    public static final int LCS_LEVEL_SIZE_MULTIPLIER = 10;
+
+    /** Target byte size for level N (N >= 1). Level 0 has no size target — it's bounded by file count instead. */
+    public static long lcsLevelTargetBytes(int level) {
+        if (level <= 0) return Long.MAX_VALUE;
+        long target = LCS_L1_MAX_BYTES;
+        for (int i = 1; i < level; i++) target *= LCS_LEVEL_SIZE_MULTIPLIER;
+        return target;
+    }
+
     // ─── Paths ────────────────────────────────────────────────────────────────
 
     /**
@@ -131,6 +180,8 @@ public final class StorageConfig {
      * Docker: /data/  (set by entrypoint via -Duser.home=/data)
      */
     private static String dataRoot() {
+        String prop = System.getProperty("AEGIS_DATA_DIR");
+        if (prop != null && !prop.isBlank()) return prop;
         String env = System.getenv("AEGIS_DATA_DIR");
         return (env != null && !env.isBlank())
             ? env

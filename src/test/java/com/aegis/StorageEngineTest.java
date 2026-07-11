@@ -3,6 +3,9 @@ package com.aegis;
 import com.aegis.commitlog.CommitLog;
 import com.aegis.commitlog.CommitLog.CommitLogPosition;
 import com.aegis.commitlog.CommitLogSegment;
+import com.aegis.compaction.CompactionStrategy;
+import com.aegis.compaction.CompactionStrategy.CompactionPlan;
+import com.aegis.compaction.LeveledCompactor;
 import com.aegis.compaction.STCSCompactor;
 import com.aegis.core.Row;
 import com.aegis.core.Row.PartitionKey;
@@ -20,6 +23,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -858,6 +862,152 @@ class StorageEngineTest {
         }
     }
 
+    // ─── J. Leveled Compaction ────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("J. Leveled Compaction (LCS)")
+    class LeveledCompactionTests {
+
+        private LeveledCompactor lcs;
+        private AtomicLong genGen;
+
+        @BeforeEach
+        void setUp() {
+            genGen = new AtomicLong(1);
+            lcs = new LeveledCompactor(tempDir, genGen);
+        }
+
+        @Test @Order(90)
+        @DisplayName("plan() triggers L0 -> L1 once the L0 file-count threshold is reached")
+        void planTriggersL0ToL1OnceThresholdReached() {
+            List<SSTableMetadata> l0 = new ArrayList<>();
+            for (int i = 0; i < StorageConfig.LCS_L0_COMPACTION_TRIGGER; i++) {
+                l0.add(mockMeta(i + 1, 1000, 0));
+            }
+
+            Optional<CompactionPlan> plan = lcs.plan(l0);
+
+            assertTrue(plan.isPresent(), "L0 at the trigger count must produce a plan");
+            assertEquals(1, plan.get().outputLevel());
+            assertEquals(StorageConfig.LCS_L0_COMPACTION_TRIGGER, plan.get().inputs().size());
+        }
+
+        @Test @Order(91)
+        @DisplayName("plan() returns empty below the L0 threshold and with no over-budget levels")
+        void planReturnsEmptyWhenNothingIsDue() {
+            List<SSTableMetadata> l0 = new ArrayList<>();
+            for (int i = 0; i < StorageConfig.LCS_L0_COMPACTION_TRIGGER - 1; i++) {
+                l0.add(mockMeta(i + 1, 1000, 0));
+            }
+
+            assertTrue(lcs.plan(l0).isEmpty(),
+                "Below the L0 trigger and with no level over its size target, nothing should be planned");
+        }
+
+        @Test @Order(92)
+        @DisplayName("plan() picks the most over-budget level, and its largest SSTable, to push down")
+        void planPicksMostOverBudgetLevelByScore() {
+            List<PartitionKey> pool = sortedKeyPool(16);
+
+            SSTableMetadata l1a = mockMetaRanged(10, pool.get(0), pool.get(3), 60_000, 1);
+            SSTableMetadata l1b = mockMetaRanged(11, pool.get(4), pool.get(7), 60_000, 1);
+            SSTableMetadata l1c = mockMetaRanged(12, pool.get(8), pool.get(11), 70_000, 1); // largest
+
+            // Total L1 bytes (190,000) comfortably exceeds LCS_L1_MAX_BYTES (131,072)
+            List<SSTableMetadata> catalog = List.of(l1a, l1b, l1c);
+
+            Optional<CompactionPlan> plan = lcs.plan(catalog);
+
+            assertTrue(plan.isPresent(), "L1 over its byte target must produce a plan");
+            assertEquals(2, plan.get().outputLevel());
+            assertEquals(1, plan.get().inputs().size(),
+                "No L2 exists yet, so only the chosen L1 SSTable should be an input");
+            assertEquals(12L, plan.get().inputs().get(0).generation(),
+                "The largest SSTable in the over-budget level should be chosen");
+        }
+
+        @Test @Order(93)
+        @DisplayName("plan() expands overlap to a fixed point, not just a single hop")
+        void planExpandsOverlapToFixedPoint() {
+            List<PartitionKey> pool = sortedKeyPool(30);
+
+            // Single L1 SSTable, large enough alone to trigger L1 -> L2.
+            SSTableMetadata chosen = mockMetaRanged(1, pool.get(5), pool.get(8), 200_000, 1);
+
+            // A directly overlaps chosen. B does NOT directly overlap chosen,
+            // but does overlap A — a naive single-pass check would miss B.
+            // C is unrelated to all of them and must never be pulled in.
+            SSTableMetadata a = mockMetaRanged(20, pool.get(7),  pool.get(12), 10_000, 2);
+            SSTableMetadata b = mockMetaRanged(21, pool.get(11), pool.get(15), 10_000, 2);
+            SSTableMetadata c = mockMetaRanged(22, pool.get(20), pool.get(25), 10_000, 2);
+
+            List<SSTableMetadata> catalog = List.of(chosen, a, b, c);
+
+            Optional<CompactionPlan> plan = lcs.plan(catalog);
+
+            assertTrue(plan.isPresent());
+            assertEquals(2, plan.get().outputLevel());
+
+            Set<Long> inputGenerations = new HashSet<>();
+            for (SSTableMetadata meta : plan.get().inputs()) inputGenerations.add(meta.generation());
+
+            assertTrue(inputGenerations.contains(1L),  "chosen L1 table must be an input");
+            assertTrue(inputGenerations.contains(20L), "A directly overlaps chosen — must be pulled in");
+            assertTrue(inputGenerations.contains(21L), "B only overlaps A, not chosen — a single-hop check would miss this");
+            assertFalse(inputGenerations.contains(22L), "C overlaps nothing in the closure — must stay untouched");
+        }
+
+        @Test @Order(94)
+        @DisplayName("End-to-end: LCS keeps every level 1+ SSTable non-overlapping after real compactions")
+        void endToEndLeveledCompactionProducesNonOverlappingLevels() throws Exception {
+            overrideDataPaths(tempDir);
+            System.setProperty("COMPACTION_STRATEGY", "LCS");
+            try {
+                try (StorageEngine engine = new StorageEngine()) {
+                    // Several overlapping-by-construction L0 SSTables, the way
+                    // real traffic produces them — each batch touches keys
+                    // spread across the whole range, not a disjoint slice.
+                    for (int batch = 0; batch < StorageConfig.LCS_L0_COMPACTION_TRIGGER; batch++) {
+                        for (int i = 0; i < 30; i++) {
+                            engine.write("key-" + (i * 7 + batch), "v", "batch" + batch + "-" + i);
+                        }
+                        engine.forceFlush();
+                    }
+
+                    boolean compacted = false;
+                    for (int i = 0; i < 100; i++) {
+                        if (engine.stats().compactionsRun() > 0) { compacted = true; break; }
+                        Thread.sleep(200);
+                    }
+                    assertTrue(compacted, "LCS should have compacted L0 into L1 within the poll window");
+
+                    Map<Integer, List<SSTableMetadata>> byLevel = new TreeMap<>();
+                    for (SSTableMetadata meta : engine.catalogSnapshot()) {
+                        byLevel.computeIfAbsent(meta.level(), l -> new ArrayList<>()).add(meta);
+                    }
+
+                    for (var entry : byLevel.entrySet()) {
+                        if (entry.getKey() == 0) continue; // L0 is allowed to overlap
+                        List<SSTableMetadata> tables = entry.getValue();
+                        for (int i = 0; i < tables.size(); i++) {
+                            for (int j = i + 1; j < tables.size(); j++) {
+                                assertFalse(tables.get(i).overlaps(tables.get(j)),
+                                    "Level " + entry.getKey() + " must never contain overlapping SSTables, but gen="
+                                        + tables.get(i).generation() + " overlaps gen=" + tables.get(j).generation());
+                            }
+                        }
+                    }
+
+                    // Correctness, not just the invariant — spot-check real reads still resolve.
+                    assertTrue(engine.read("key-0").isPresent());
+                    assertTrue(engine.read("key-" + (29 * 7 + 3)).isPresent());
+                }
+            } finally {
+                System.clearProperty("COMPACTION_STRATEGY");
+            }
+        }
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     /**
@@ -872,12 +1022,41 @@ class StorageEngineTest {
     }
 
     private SSTableMetadata mockMeta(long generation, long dataSizeBytes) {
+        return mockMeta(generation, dataSizeBytes, 0);
+    }
+
+    private SSTableMetadata mockMeta(long generation, long dataSizeBytes, int level) {
         return new SSTableMetadata(
             generation, tempDir, 100, 200,
             PartitionKey.of("min"), PartitionKey.of("max"),
             CommitLogPosition.NONE,
-            System.currentTimeMillis(), dataSizeBytes, 1024
+            System.currentTimeMillis(), dataSizeBytes, 1024,
+            level
         );
+    }
+
+    /** Metadata with an explicit key range, for tests that need to control overlap deliberately. */
+    private SSTableMetadata mockMetaRanged(long generation, PartitionKey minKey, PartitionKey maxKey,
+                                            long dataSizeBytes, int level) {
+        return new SSTableMetadata(
+            generation, tempDir, 100, 200,
+            minKey, maxKey,
+            CommitLogPosition.NONE,
+            System.currentTimeMillis(), dataSizeBytes, 1024,
+            level
+        );
+    }
+
+    /**
+     * Keys are ordered by Murmur3 token, not lexicographically — so tests that
+     * need genuinely ordered, non-overlapping ranges generate a pool and sort
+     * it by actual token order rather than assuming string order means anything.
+     */
+    private static List<PartitionKey> sortedKeyPool(int n) {
+        List<PartitionKey> keys = new ArrayList<>();
+        for (int i = 0; i < n; i++) keys.add(PartitionKey.of("pool-key-" + i));
+        keys.sort(Comparator.naturalOrder());
+        return keys;
     }
 
     private static void deleteDir(Path dir) throws IOException {

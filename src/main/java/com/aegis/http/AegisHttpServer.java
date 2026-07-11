@@ -33,7 +33,9 @@ import java.util.concurrent.Executors;
  *   POST /write?key=&col=&val=          -> write a cell
  *   GET  /read?key=                     -> read a partition (JSON)
  *   POST /delete?key=&col=              -> tombstone a cell
+ *   POST /flush                         -> force a MemTable flush now (like `nodetool flush`)
  *   GET  /stats                         -> engine metrics (JSON)
+ *   GET  /levels                        -> per-level SSTable counts/bytes (JSON) — only meaningful under LCS
  *   GET  /                              -> tiny HTML status page
  */
 public final class AegisHttpServer {
@@ -53,7 +55,9 @@ public final class AegisHttpServer {
         server.createContext("/write",   AegisHttpServer::handleWrite);
         server.createContext("/read",    AegisHttpServer::handleRead);
         server.createContext("/delete",  AegisHttpServer::handleDelete);
+        server.createContext("/flush",   AegisHttpServer::handleFlush);
         server.createContext("/stats",   AegisHttpServer::handleStats);
+        server.createContext("/levels",  AegisHttpServer::handleLevels);
         server.createContext("/",        AegisHttpServer::handleIndex);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
@@ -139,20 +143,61 @@ public final class AegisHttpServer {
         }
     }
 
+    /**
+     * Force a MemTable flush right now, the same tool a real operator reaches
+     * for (`nodetool flush`) — mainly so a small demo workload can produce
+     * several SSTables without needing to push enough writes to cross
+     * MEMTABLE_FLUSH_THRESHOLD_BYTES naturally.
+     */
+    private static void handleFlush(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            respond(ex, 405, "text/plain", "POST only");
+            return;
+        }
+        try {
+            engine.forceFlush();
+            respond(ex, 200, "application/json", "{\"status\":\"flushed\"}");
+        } catch (Exception e) {
+            respond(ex, 500, "application/json", errorJson(e));
+        }
+    }
+
     private static void handleStats(HttpExchange ex) throws IOException {
         var s = engine.stats();
         String json = """
             {"totalWrites":%d,"totalReads":%d,"readHitsMemtable":%d,"readHitsSStable":%d,\
             "readMisses":%d,"readHitRatio":%.4f,"flushCount":%d,\
             "activeMemTableRows":%d,"activeMemTableBytes":%d,"sstableCount":%d,\
-            "compactionsRun":%d,"tombstonesPurged":%d,"bytesReclaimed":%d,\
+            "compactionStrategy":"%s","compactionsRun":%d,"tombstonesPurged":%d,\
+            "bytesReclaimed":%d,"compactionBytesWritten":%d,\
+            "sstablesScannedForReads":%d,"avgSStablesScannedPerSStableRead":%.3f,\
             "commitLogWrites":%d}""".formatted(
             s.totalWrites(), s.totalReads(), s.readHitsMemtable(), s.readHitsSStable(),
             s.readMisses(), s.readHitRatio(), s.flushCount(),
             s.activeMemTableRows(), s.activeMemTableBytes(), s.sstableCount(),
-            s.compactionsRun(), s.tombstonesPurged(), s.bytesReclaimed(),
+            s.compactionStrategy(), s.compactionsRun(), s.tombstonesPurged(),
+            s.bytesReclaimed(), s.compactionBytesWritten(),
+            s.sstablesScannedForReads(), s.avgSStablesScannedPerSStableRead(),
             s.commitLogWrites());
         respond(ex, 200, "application/json", json);
+    }
+
+    /** Per-level SSTable counts and byte totals. Under STCS everything is level 0; under LCS this is the whole story. */
+    private static void handleLevels(HttpExchange ex) throws IOException {
+        var levels = engine.levelSummary();
+        StringBuilder sb = new StringBuilder("{\"levels\":[");
+        boolean first = true;
+        for (var entry : levels.entrySet()) {
+            if (!first) sb.append(",");
+            first = false;
+            var summary = entry.getValue();
+            sb.append("{\"level\":").append(summary.level())
+              .append(",\"sstableCount\":").append(summary.sstableCount())
+              .append(",\"totalBytes\":").append(summary.totalBytes())
+              .append("}");
+        }
+        sb.append("]}");
+        respond(ex, 200, "application/json", sb.toString());
     }
 
     private static void handleIndex(HttpExchange ex) throws IOException {

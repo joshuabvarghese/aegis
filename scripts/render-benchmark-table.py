@@ -43,7 +43,13 @@ def main():
     json_path, readme_path = sys.argv[1], sys.argv[2]
 
     with open(json_path) as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"'{json_path}' isn't valid JSON — JMH probably wrote CSV instead.")
+            print("Make sure the JMH invocation includes '-rf json' alongside '-rff <path>';")
+            print("without an explicit -rf, JMH defaults to CSV, not JSON.")
+            sys.exit(1)
 
     if not data:
         print("No benchmark results found in JSON — JMH run may have failed.")

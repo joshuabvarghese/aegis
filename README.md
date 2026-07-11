@@ -10,8 +10,8 @@ CommitLog → MemTable → SSTable flush → Size-Tiered Compaction. Built in Ja
 ## One-command demo
 
 ```bash
-git clone https://github.com/joshuabvarghese/aegis
-cd aegis
+git clone https://github.com/joshuabvarghese/aegis-storage
+cd aegis-storage
 docker compose run --rm demo
 ```
 
@@ -96,6 +96,7 @@ Every component maps to a named Cassandra internal:
 | `SSTableWriter` | `SSTableWriter` | `sstable_compression` |
 | `SSTableReader` | `SSTableReader` | (internal) |
 | `STCSCompactor` | `SizeTieredCompactionStrategy` | `compaction = {'class': 'STCS'}` |
+| `LeveledCompactor` | `LeveledCompactionStrategy` | `compaction = {'class': 'LCS'}` |
 | `GC_GRACE_SECONDS` | `gc_grace_seconds` | `gc_grace_seconds = 864000` |
 
 ---
@@ -122,7 +123,9 @@ src/main/java/com/aegis/
 │   └── SSTableReader.java    4-step read: Bloom → Summary binary search → Index scan → Data
 │
 ├── compaction/
-│   └── STCSCompactor.java    STCS bucketing (bucket_low/high), k-way merge, tombstone purge
+│   ├── CompactionStrategy.java  Shared interface: plan()/execute(), implemented by both below
+│   ├── STCSCompactor.java       STCS bucketing (bucket_low/high), k-way merge, tombstone purge
+│   └── LeveledCompactor.java    LCS — non-overlapping levels, fixed-point overlap expansion
 │
 ├── StorageEngine.java        Top-level coordinator — write path, read path, background daemons
 │
@@ -195,6 +198,36 @@ The JUnit suite also includes a concurrency stress section (`I. Concurrency Stre
 
 ---
 
+## Compaction Strategies: STCS vs LCS
+
+Every LSM-tree compaction strategy is a choice about which two points of the **write / read / space amplification** triangle to optimise for, at the expense of the third. Aegis-Storage ships two real implementations of the trade-off, not just one with the other described in a comment:
+
+- **STCS** (Size-Tiered, the default — Cassandra's default too) merges SSTables of similar size together, regardless of key range. Low write amplification, but SSTables can overlap freely, so a point read may have to check every SSTable on disk.
+- **LCS** (Leveled — RocksDB/LevelDB's default, also selectable in real Cassandra) enforces that SSTables within the same level (L1+) never overlap in key range. A point read touches at most one SSTable per level — a large read-amplification win — at the cost of much higher write amplification, since data gets rewritten every time its level compacts into the next.
+
+Switch strategies with an environment variable, no rebuild required:
+
+```bash
+docker compose run --rm -e COMPACTION_STRATEGY=LCS engine   # interactive shell, LCS active
+docker run -e COMPACTION_STRATEGY=LCS aegis-storage:latest serve
+```
+
+Both strategies implement the same `CompactionStrategy` interface (`plan()` / `execute()`), so `StorageEngine` itself doesn't know or care which one is running — and the read path is level-aware regardless of which strategy produced the catalog: level 0 is always checked exhaustively (newest first, since it can overlap), while level 1+ is range-checked to find the single SSTable that could possibly hold the key.
+
+**A real numbers, not a claim:**
+
+```bash
+./scripts/compare-compaction-strategies.sh
+```
+
+This runs an identical write → flush → read workload against two containers — one on STCS, one on LCS — and prints a measured side-by-side comparison: average SSTables opened per read, total bytes written during compaction, and the resulting per-level structure of each. Increase the write count (first argument) if your run doesn't show LCS splitting past L1 yet — the read-amplification gap widens as the dataset grows, which is the whole point.
+
+**Known simplifications versus production LCS** (documented in `LeveledCompactor`'s class javadoc too): a single output SSTable per compaction round rather than splitting into fixed-size files the way RocksDB does, and picking the *largest* SSTable in an over-budget level to push down rather than LevelDB's persistent round-robin cursor. Both are reasonable at this project's data volumes; a production implementation would need to revisit them at real-world scale.
+
+One correctness subtlety worth calling out explicitly: expanding "which next-level SSTables overlap the one being pushed down" cannot stop after a single pass. Pulling in one overlapping table can widen the merged range enough to newly overlap a *second* table that didn't intersect the original range at all — miss that, and the non-overlap invariant for the level silently breaks. `LeveledCompactor.expandToOverlapClosure()` keeps adding overlapping tables until a full pass adds none, which is the actual requirement, not a single-hop check. `StorageEngineTest`'s `J. Leveled Compaction` section tests this directly, along with an end-to-end test that runs real writes and compactions through the full engine and asserts no two SSTables in the same level ever overlap.
+
+---
+
 ## Live Dashboard
 
 `dashboard/index.html` is a single, dependency-free static file that polls `/stats` and renders the engine's live read path and throughput. It works against either a local `serve` container or a deployed Cloud Run URL — just point it at the right address.
@@ -228,7 +261,9 @@ Once deployed:
 curl https://YOUR-SERVICE-URL/healthz
 curl -X POST "https://YOUR-SERVICE-URL/write?key=cassandra&col=version&val=5.0"
 curl "https://YOUR-SERVICE-URL/read?key=cassandra"
+curl -X POST "https://YOUR-SERVICE-URL/flush"
 curl "https://YOUR-SERVICE-URL/stats"
+curl "https://YOUR-SERVICE-URL/levels"
 ```
 
 **Storage is ephemeral** — each new revision or scale-to-zero cold start begins with an empty CommitLog/MemTable/SSTables, since data lives on container-local disk. That's expected for a demo/portfolio deployment like this one, not a place to keep data you care about.
@@ -308,7 +343,7 @@ Once inside the interactive shell (`docker compose run --rm engine`):
 | `delete <key> <col>` | Insert tombstone cell |
 | `blast <n>` | Write n rows via Virtual Thread pool, prints throughput |
 | `flush` | Force MemTable → SSTable flush |
-| `compact` | Trigger STCS compaction cycle |
+| `compact` | Trigger a compaction cycle (STCS or LCS, whichever is active) |
 | `stats` | Full engine metrics snapshot |
 | `demo` | Run the 6-act automated demo |
 | `quit` | Graceful shutdown |
@@ -332,7 +367,20 @@ The heap gauge in the stats output proves the engine stays well under 256MB even
 These numbers are measured, not guessed — run `./scripts/update-benchmark-numbers.sh` on your own machine any time to regenerate this table from a real JMH run in the same container image used everywhere else in this project. Until you run it, the table below reflects whichever machine last ran it.
 
 <!-- BENCHMARK_TABLE_START -->
-_Not yet measured on this machine. Run `./scripts/update-benchmark-numbers.sh` to populate this table with real numbers._
+_Measured 2026-07-11 02:10 UTC on Darwin arm64, inside the same container image used everywhere else in this project. Re-run `./scripts/update-benchmark-numbers.sh` any time to refresh these numbers on your own hardware._
+
+| Benchmark | What it measures | Avg time/op | Throughput |
+|---|---|---|---|
+| `benchmarkBloomFilterAdd` | Insert into Bloom filter | 0.026 us/op | 31.5 ops/us |
+| `benchmarkBloomFilterHit` | Probable hit check | 0.0244 us/op | 39.1 ops/us |
+| `benchmarkBloomFilterMiss` | Definitive miss (zero disk I/O path) | 0.02 us/op | 50.6 ops/us |
+| `benchmarkCommitLogAppend` | Full FileChannel write, PERIODIC mode | 1.48 us/op | 0.669 ops/us |
+| `benchmarkCommitLogSerialization` | Row to bytes, no I/O | 0.184 us/op | 4.96 ops/us |
+| `benchmarkEngineReadMemTable` | ConcurrentSkipListMap.get() | 0.0265 us/op | 32.9 ops/us |
+| `benchmarkFullEngineWrite` | CommitLog to MemTable end-to-end | 2.45 us/op | 0.404 ops/us |
+| `benchmarkMurmur3Token` | Partition key hashing | 0.00782 us/op | 130 ops/us |
+| `benchmarkRowMerge` | Compaction reconciliation per row | 0.0202 us/op | 50.9 ops/us |
+| `benchmarkTombstonePurge` | Tombstone GC-grace check | 1.58 us/op | 0.677 ops/us |
 <!-- BENCHMARK_TABLE_END -->
 
 ---

@@ -55,6 +55,8 @@ public class StorageBenchmark {
 
     private final List<Row> rowsToMerge = new ArrayList<>();
 
+    private Path engineDataDir;
+
     @Setup(Level.Trial)
     public void setup() throws IOException {
         this.key = PartitionKey.of(keyParam);
@@ -86,7 +88,17 @@ public class StorageBenchmark {
             rowsToMerge.add(r);
         }
 
-        // Full engine (no cold tier — isolates local path)
+        // Full engine — an isolated, fresh data directory PER FORK. Every JMH
+        // fork otherwise inherits AEGIS_DATA_DIR from the container (a
+        // persistent volume), which means every fork's constructor would
+        // replay every previous fork's entire CommitLog. That accumulates
+        // without bound across a single bench run (let alone repeated runs
+        // against the same volume) until CommitLog replay itself runs the
+        // fork's -Xmx256m heap out of memory — which is exactly what used to
+        // happen. Overriding AEGIS_DATA_DIR to a fresh temp dir here means
+        // every fork starts from zero, regardless of what else has run.
+        this.engineDataDir = Files.createTempDirectory("aegis-bench-engine-");
+        System.setProperty("AEGIS_DATA_DIR", engineDataDir.toString());
         this.engine = new StorageEngine();
     }
 
@@ -95,6 +107,8 @@ public class StorageBenchmark {
         clSegment.close();
         engine.close();
         deleteDir(tempDir);
+        deleteDir(engineDataDir);
+        System.clearProperty("AEGIS_DATA_DIR");
     }
 
     // ─── A. Murmur3 Token ─────────────────────────────────────────────────────

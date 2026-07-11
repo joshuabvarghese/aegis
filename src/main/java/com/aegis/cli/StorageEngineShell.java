@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.*;
  *
  * This is the demo entry point. It gives an interviewer a live window into
  * every layer of the LSM-tree — from CommitLog append through MemTable,
- * SSTable flush, and STCS compaction.
+ * SSTable flush, and compaction (STCS or LCS).
  *
  * ─── Commands ────────────────────────────────────────────────────────────────
  *
@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.*;
  *   delete <key> <column>           Insert a tombstone
  *   blast <n>                       Write n records at max throughput (JMH-lite)
  *   flush                           Force MemTable → SSTable flush
- *   compact                         Force STCS compaction cycle
+ *   compact                         Force a compaction cycle (STCS or LCS, whichever is active)
  *   stats                           Print full engine metrics
  *   demo                            Run the full automated demo sequence
  *   help                            Show this help
@@ -56,6 +56,8 @@ public final class StorageEngineShell {
         engine = new StorageEngine();
 
         System.out.println("  Engine ready. CommitLog + MemTable active.");
+        System.out.println("  Compaction strategy: " + engine.stats().compactionStrategy()
+            + " (set COMPACTION_STRATEGY=LCS to try Leveled Compaction instead)");
         System.out.println();
         System.out.println("  Type 'demo' to run the full automated demo, or 'help' for commands.");
         System.out.println();
@@ -338,7 +340,7 @@ public final class StorageEngineShell {
             delete <key> <column>           Insert a tombstone (LSM delete)
             blast  <n>                      Throughput test: write n rows via VirtualThreads
             flush                           Force MemTable → SSTable flush
-            compact                         Force STCS compaction cycle
+            compact                         Force a compaction cycle (STCS or LCS, whichever is active)
             stats                           Full engine metrics snapshot
             demo                            Run the automated 6-act demo
             quit                            Shutdown gracefully

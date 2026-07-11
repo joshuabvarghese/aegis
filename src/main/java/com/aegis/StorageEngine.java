@@ -2,6 +2,9 @@ package com.aegis;
 
 import com.aegis.commitlog.CommitLog;
 import com.aegis.commitlog.CommitLog.CommitLogPosition;
+import com.aegis.compaction.CompactionStrategy;
+import com.aegis.compaction.CompactionStrategy.CompactionPlan;
+import com.aegis.compaction.LeveledCompactor;
 import com.aegis.compaction.STCSCompactor;
 import com.aegis.core.Row;
 import com.aegis.core.Row.PartitionKey;
@@ -47,14 +50,16 @@ import java.util.stream.Stream;
  *     │
  *     ├─► 1. activeMemTable.get(key)         O(log n) skip-list lookup
  *     ├─► 2. flushingMemTable.get(key)        if one exists (being flushed)
- *     └─► 3. for each SSTable (newest first):
- *               bloomFilter.mightContain(key) O(k) — skip if false
- *               binarySearch(index, key)      find data offset
- *               readPartition(dataOffset)     single random I/O
+ *     └─► 3. SSTables, grouped by level:
+ *               level 0 (may overlap)         check every L0 table, newest first
+ *               level 1+ (never overlap)      range-check finds at most one candidate per level
  *
  * COMPACTION:
  *   Background Virtual Thread, fires every COMPACTION_CHECK_INTERVAL_MS.
- *   Calls STCSCompactor to merge SSTables when a size-tiered bucket is eligible.
+ *   Delegates to whichever CompactionStrategy is configured — STCSCompactor
+ *   (default) or LeveledCompactor — via COMPACTION_STRATEGY. Both implement
+ *   the same plan()/execute() contract, so the engine itself doesn't know or
+ *   care which one is running.
  */
 public final class StorageEngine implements Closeable {
 
@@ -62,8 +67,8 @@ public final class StorageEngine implements Closeable {
 
     // ─── Components ───────────────────────────────────────────────────────────
 
-    private final CommitLog       commitLog;
-    private final STCSCompactor   compactor;
+    private final CommitLog          commitLog;
+    private final CompactionStrategy compactor;
 
     // MemTable management — read-write lock protects the swap from active → flushing
     private volatile MemTable     activeMemTable;
@@ -87,6 +92,10 @@ public final class StorageEngine implements Closeable {
     private final AtomicLong readHitsSStable  = new AtomicLong(0);
     private final AtomicLong readMisses        = new AtomicLong(0);
     private final AtomicLong flushCount        = new AtomicLong(0);
+    // Read amplification proxy: how many SSTables were actually opened and
+    // checked to answer reads, in total. Divided by totalReads, this is the
+    // number that makes the STCS-vs-LCS comparison concrete instead of a claim.
+    private final AtomicLong sstablesScannedForReads = new AtomicLong(0);
 
     // ─── Construction ─────────────────────────────────────────────────────────
 
@@ -108,14 +117,17 @@ public final class StorageEngine implements Closeable {
         // Scan SSTable directory and rebuild catalog
         rebuildCatalog();
 
-        // Boot compactor
-        this.compactor = new STCSCompactor(StorageConfig.ssTableDir(), generationGen);
+        // Boot compactor — STCS (default) or LCS, selected via COMPACTION_STRATEGY env var
+        this.compactor = switch (StorageConfig.compactionStrategy()) {
+            case LCS  -> new LeveledCompactor(StorageConfig.ssTableDir(), generationGen);
+            case STCS -> new STCSCompactor(StorageConfig.ssTableDir(), generationGen);
+        };
 
         // Start background daemons
         startCompactionDaemon();
 
-        log.info("[ENGINE] StorageEngine started. sstables=%d"
-            .formatted(sstableCatalog.size()));
+        log.info("[ENGINE] StorageEngine started. sstables=%d compaction=%s"
+            .formatted(sstableCatalog.size(), compactor.strategyName()));
     }
 
     // ─── Write Path ───────────────────────────────────────────────────────────
@@ -198,28 +210,59 @@ public final class StorageEngine implements Closeable {
             return memResult;
         }
 
-        // Step 2: SSTables — newest first, Bloom filter on each
-        // Newest SSTables are prepended to the catalog, so iterating forward
-        // gives us newest-first, matching Cassandra's read priority.
+        // Step 2: SSTables.
+        //
+        // Level 0 holds raw flush output (and everything STCS produces, since
+        // STCS is deliberately unleveled) — these can overlap in key range, so
+        // every L0 SSTable must be checked, newest first.
+        //
+        // Level 1+ only exists under LeveledCompactor, which guarantees
+        // SSTables within the same level never overlap in key range. That
+        // means at most one SSTable per level can possibly contain the key —
+        // we range-check to find it and stop at the first level that has one,
+        // instead of checking every SSTable the way STCS has to.
+        Map<Integer, List<SSTableMetadata>> byLevel = new TreeMap<>();
         for (SSTableMetadata meta : sstableCatalog) {
-            if (meta.minKey() != null && meta.maxKey() != null) {
-                // Fast key range check before opening a reader
-                if (key.compareTo(meta.minKey()) < 0 ||
-                    key.compareTo(meta.maxKey()) > 0) continue;
-            }
-
             if (!meta.dataPath().toFile().exists()) continue; // data file missing, skip
+            byLevel.computeIfAbsent(meta.level(), l -> new ArrayList<>()).add(meta);
+        }
 
-            try (SSTableReader reader = new SSTableReader(meta)) {
-                Optional<Row> sstResult = reader.get(key);
-                if (sstResult.isPresent()) {
-                    readHitsSStable.incrementAndGet();
-                    return sstResult;
+        for (var levelEntry : byLevel.entrySet()) {
+            List<SSTableMetadata> tables = levelEntry.getValue();
+
+            if (levelEntry.getKey() == 0) {
+                tables.sort(Comparator.comparingLong(SSTableMetadata::createdAtMs).reversed());
+                for (SSTableMetadata meta : tables) {
+                    Optional<Row> result = readFromSSTableIfInRange(meta, key);
+                    if (result.isPresent()) return result;
+                }
+            } else {
+                for (SSTableMetadata meta : tables) {
+                    if (meta.mightContainKey(key)) {
+                        Optional<Row> result = readFromSSTableIfInRange(meta, key);
+                        if (result.isPresent()) return result;
+                        break; // non-overlapping level — no other table here can contain this key
+                    }
                 }
             }
         }
 
         readMisses.incrementAndGet();
+        return Optional.empty();
+    }
+
+    /** Range-checks, then opens and queries a single SSTable, counting it toward read amplification. */
+    private Optional<Row> readFromSSTableIfInRange(SSTableMetadata meta, PartitionKey key) throws IOException {
+        if (!meta.mightContainKey(key)) return Optional.empty();
+
+        sstablesScannedForReads.incrementAndGet();
+        try (SSTableReader reader = new SSTableReader(meta)) {
+            Optional<Row> result = reader.get(key);
+            if (result.isPresent()) {
+                readHitsSStable.incrementAndGet();
+                return result;
+            }
+        }
         return Optional.empty();
     }
 
@@ -393,6 +436,7 @@ public final class StorageEngine implements Closeable {
 
         long clSegmentId = buf.getLong();
         long clPosition  = buf.getLong();
+        int  level       = buf.remaining() >= 4 ? buf.getInt() : 0;
 
         return new SSTableMetadata(
             generation,
@@ -401,7 +445,8 @@ public final class StorageEngine implements Closeable {
             minKeyLen > 0 ? PartitionKey.of(minKeyBytes) : null,
             maxKeyLen > 0 ? PartitionKey.of(maxKeyBytes) : null,
             new CommitLogPosition(clSegmentId, clPosition),
-            createdAt, dataSize, filterSize
+            createdAt, dataSize, filterSize,
+            level
         );
     }
 
@@ -423,18 +468,14 @@ public final class StorageEngine implements Closeable {
         List<SSTableMetadata> localSSTables = new ArrayList<>(sstableCatalog);
         // Only compact local (non-offloaded) SSTables
         localSSTables.removeIf(m -> !m.dataPath().toFile().exists());
-        if (localSSTables.size() < StorageConfig.STCS_MIN_THRESHOLD) return;
 
-        List<List<SSTableMetadata>> buckets = compactor.formBuckets(localSSTables);
-        Optional<List<SSTableMetadata>> bucket = compactor.selectCompactionBucket(buckets);
+        Optional<CompactionPlan> plan = compactor.plan(localSSTables);
+        if (plan.isEmpty()) return;
 
-        if (bucket.isEmpty()) return;
-
-        List<SSTableMetadata> toCompact = bucket.get();
-        SSTableMetadata output = compactor.compact(toCompact);
+        SSTableMetadata output = compactor.execute(plan.get());
 
         // Update catalog: remove inputs, add output
-        sstableCatalog.removeAll(toCompact);
+        sstableCatalog.removeAll(plan.get().inputs());
         sstableCatalog.add(0, output);
     }
 
@@ -452,8 +493,21 @@ public final class StorageEngine implements Closeable {
             compactor.compactionsRun(),
             compactor.tombstonesPurged(),
             compactor.bytesReclaimed(),
+            compactor.bytesWritten(),
+            compactor.strategyName(),
+            sstablesScannedForReads.get(),
             commitLog.totalWrites()
         );
+    }
+
+    /** Per-level SSTable counts and byte totals — meaningful under LCS; under STCS everything sits in level 0. */
+    public Map<Integer, LeveledCompactor.LevelSummary> levelSummary() {
+        return LeveledCompactor.summarizeLevels(new ArrayList<>(sstableCatalog));
+    }
+
+    /** Snapshot of the current SSTable catalog — used by tests and tooling to inspect per-level state directly. */
+    public List<SSTableMetadata> catalogSnapshot() {
+        return new ArrayList<>(sstableCatalog);
     }
 
     public record EngineStats(
@@ -467,6 +521,9 @@ public final class StorageEngine implements Closeable {
         long compactionsRun,
         long tombstonesPurged,
         long bytesReclaimed,
+        long compactionBytesWritten,
+        String compactionStrategy,
+        long sstablesScannedForReads,
         long commitLogWrites
     ) {
         public double readHitRatio() {
@@ -474,20 +531,27 @@ public final class StorageEngine implements Closeable {
             return totalReads == 0 ? 0.0 : (double) hits / totalReads;
         }
 
+        /** Average number of SSTables actually opened per read that reached the SSTable tier — the read-amplification number. */
+        public double avgSStablesScannedPerSStableRead() {
+            long sstableReads = readHitsSStable + readMisses;
+            return sstableReads == 0 ? 0.0 : (double) sstablesScannedForReads / sstableReads;
+        }
+
         public void print() {
             System.out.println("┌─────────────────────────────────────────────────────────┐");
             System.out.println("│                  STORAGE ENGINE STATS                   │");
             System.out.println("├─────────────────────────────────────────────────────────┤");
+            System.out.printf( "│  Compaction: %-6s                                      │%n", compactionStrategy);
             System.out.printf( "│  Writes:     %-10d  CommitLog writes: %-10d    │%n", totalWrites, commitLogWrites);
             System.out.printf( "│  Reads:      %-10d  Hit ratio:        %.1f%%              │%n", totalReads, readHitRatio()*100);
             System.out.printf( "│  MemTable:   %-6d hits    SSTables: %-6d hits          │%n", readHitsMemtable, readHitsSStable);
-            System.out.printf( "│  Misses:     %-6d                                       │%n", readMisses);
+            System.out.printf( "│  Misses:     %-6d    Avg SSTables scanned/read: %.2f    │%n", readMisses, avgSStablesScannedPerSStableRead());
             System.out.println("├─────────────────────────────────────────────────────────┤");
             System.out.printf( "│  Active MemTable: %d rows / %d KB                        │%n", activeMemTableRows, activeMemTableBytes/1024);
             System.out.printf( "│  SSTables:        %d on disk                             │%n", sstableCount);
             System.out.printf( "│  Flushes:         %d                                     │%n", flushCount);
             System.out.printf( "│  Compactions:     %d  tombstones purged: %d              │%n", compactionsRun, tombstonesPurged);
-            System.out.printf( "│  Bytes reclaimed: %d KB                                  │%n", bytesReclaimed/1024);
+            System.out.printf( "│  Bytes reclaimed: %d KB   bytes written: %d KB           │%n", bytesReclaimed/1024, compactionBytesWritten/1024);
             System.out.println("└─────────────────────────────────────────────────────────┘");
         }
     }
