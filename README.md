@@ -54,7 +54,7 @@ docker compose run --rm engine
   │  ├── {gen}-Filter.db      Bloom filter (1% FPP)         │
   │  ├── {gen}-Statistics.db  metadata + CommitLog pos      │
   │  └── {gen}-Summary.db     sampled index summary         │
-  └───────────────────────────────────────────────────────────┘
+  └─────────────────────────────────────────────────────────┘
 
                           READ PATH
                           ─────────
