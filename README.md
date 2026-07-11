@@ -10,8 +10,8 @@ CommitLog → MemTable → SSTable flush → Size-Tiered Compaction. Built in Ja
 ## One-command demo
 
 ```bash
-git clone https://github.com/joshuabvarghese/aegis-storage
-cd aegis-storage
+git clone https://github.com/joshuabvarghese/aegis
+cd aegis
 docker compose run --rm demo
 ```
 
